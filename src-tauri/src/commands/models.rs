@@ -156,10 +156,10 @@ pub fn switch_active_model(app: &AppHandle, model_id: &str) -> Result<(), String
     if app
         .state::<Arc<crate::managers::audio::AudioRecordingManager>>()
         .is_recording()
-        || crate::gemini::busy()
     {
         return Err("Finish the recording or cloud request before changing models".into());
     }
+    let _cloud_idle = crate::gemini::idle_guard()?;
     // Atomically claim the loading slot — prevents concurrent model loads
     // from tray double-clicks or overlapping commands. The guard resets the
     // flag on drop (including early returns, errors, and panics).

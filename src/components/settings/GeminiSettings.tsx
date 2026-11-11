@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { useTranslation } from "react-i18next";
 import { commands } from "@/bindings";
@@ -33,6 +34,20 @@ export const GeminiSettings: React.FC<{
     setStatus(next);
     setLocalModel(next.fallback_model);
   };
+  useEffect(() => {
+    if (disabled) return;
+    const unlisten = listen("gemini-clips-changed", () => {
+      refresh().catch(() => setMessage(t("gemini.settingsError")));
+    });
+    const refreshOnFocus = () => {
+      refresh().catch(() => setMessage(t("gemini.settingsError")));
+    };
+    window.addEventListener("focus", refreshOnFocus);
+    return () => {
+      unlisten.then((stop) => stop());
+      window.removeEventListener("focus", refreshOnFocus);
+    };
+  }, [disabled]);
   useEffect(() => {
     if (!disabled) refresh().catch(() => setMessage(t("gemini.settingsError")));
   }, [disabled]);

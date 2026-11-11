@@ -1046,6 +1046,7 @@ impl TranscriptionManager {
                     }
                     if local.is_ok() {
                         let _ = std::fs::remove_file(path);
+                        let _ = self.app_handle.emit("gemini-clips-changed", ());
                     }
                     return local
                         .map_err(|_| anyhow::anyhow!("{error} Local fallback also failed."));

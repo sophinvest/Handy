@@ -13,12 +13,14 @@ use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
 };
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 pub const MODEL_ID: &str = "google-gemini-cloud";
 static REQUEST: Mutex<()> = Mutex::new(());
-pub fn busy() -> bool {
-    REQUEST.try_lock().is_err()
+pub fn idle_guard() -> Result<std::sync::MutexGuard<'static, ()>, String> {
+    REQUEST
+        .try_lock()
+        .map_err(|_| "Finish the current Gemini request first".into())
 }
 fn key_entry() -> Result<keyring::Entry, String> {
     keyring::Entry::new("com.sophinvest.handy.gemini", "api-key")
@@ -107,6 +109,7 @@ fn save(app: &AppHandle, samples: &[f32]) -> Result<PathBuf, String> {
         .open(&path)
         .and_then(|f| f.sync_all())
         .map_err(|_| "Cannot finish saving recording")?;
+    let _ = app.emit("gemini-clips-changed", ());
     Ok(path)
 }
 fn failed(app: &AppHandle, message: impl std::fmt::Display) -> String {
@@ -143,8 +146,8 @@ pub fn transcribe(
     ),
     String,
 > {
-    let path = save(app, samples)?;
     let guard = REQUEST.try_lock().ok();
+    let path = save(app, samples)?;
     let result = (|| {
         if guard.is_none() {
             return Err("Another Gemini request is running".to_string());
@@ -155,6 +158,7 @@ pub fn transcribe(
     .map_err(|e: String| failed(app, e));
     if result.is_ok() {
         let _ = fs::remove_file(&path);
+        let _ = app.emit("gemini-clips-changed", ());
     }
     Ok((guard, path, result))
 }
@@ -213,9 +217,7 @@ pub async fn gemini_save_key(app: AppHandle, key: String) -> Result<Vec<String>,
 #[tauri::command]
 #[specta::specta]
 pub fn gemini_set_fallback(app: AppHandle, enabled: bool, model: String) -> Result<(), String> {
-    if busy() {
-        return Err("Finish the current Gemini request first".into());
-    }
+    let _guard = idle_guard()?;
     if enabled {
         let mm = app.state::<Arc<crate::managers::model::ModelManager>>();
         if model == MODEL_ID || !mm.get_model_info(&model).is_some_and(|m| m.is_downloaded) {
