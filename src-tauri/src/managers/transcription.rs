@@ -1034,7 +1034,7 @@ impl TranscriptionManager {
                                 .spoken_language(outcome.model_detected_language.as_deref());
                             Transcription {
                                 text: finish_text(outcome, &cloud_settings),
-                                language,
+                                language: Some(language),
                             }
                         });
                     // Opt-in fallback never leaves the local inference worker resident.
