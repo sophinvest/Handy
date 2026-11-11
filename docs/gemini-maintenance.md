@@ -66,7 +66,7 @@ The following is the concrete integration surface, rather than a claim that this
 - [`src/i18n/locales/zh-TW/translation.json`](../src/i18n/locales/zh-TW/translation.json)
 - [`src/i18n/locales/zh/translation.json`](../src/i18n/locales/zh/translation.json)
 
-`.github/workflows/build.yml` also adds the Linux D-Bus development dependency for Secret Service. New files are the isolated Gemini modules/tests, shared cloud settings component, bounded CPU-load harness and these guides.
+`.github/workflows/build.yml` also adds the Linux D-Bus development dependency for Secret Service. The shared Debian configuration declares `libvulkan1` because the shipped, dynamically loaded Vulkan backend needs it even though the main executable's dependency scan does not find it. AppImage deliberately uses the host Vulkan loader; its setup instructions cover that dependency. New files are the isolated Gemini modules/tests, shared cloud settings component, bounded CPU-load harness and these guides.
 
 ## Bring in the next official Handy release
 
