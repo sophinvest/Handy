@@ -1027,6 +1027,19 @@
     "storage": {
       "keyring": "Key storage: GNOME Keyring / Secret Service.",
       "file": "Key storage: private file (0600) in Handy’s gemini-credentials folder. Secret Service was unavailable when saving."
-    }
+    },
+    "liveModel": "Live model: {{model}}",
+    "liveUnavailable": "unavailable for this key; use pause pieces",
+    "mode": "Cloud dictation mode",
+    "modeAuto": "Live preview, then pause pieces if unavailable",
+    "modeChunks": "Pause pieces",
+    "modeSingle": "Single upload after release (comparison)",
+    "quotaHint": "Enter the unary model’s project limits from Google AI Studio. Unknown limits stop piece uploads and keep the recording. Live availability and its quota are checked by Google; no fixed free session allowance is assumed.",
+    "rpm": "Project requests per minute",
+    "rpd": "Project requests per day",
+    "saveMode": "Save mode and limits",
+    "usage": "This app made {{count}} unary requests since midnight Pacific time. Other apps using this project are not included.",
+    "nearQuota": "Near the configured daily request limit. Audio will stay saved when the limit is reached.",
+    "pasteRelease": "Live text is a preview only. Handy pastes once after release. Typing into other apps while speaking is disabled."
   }
 }

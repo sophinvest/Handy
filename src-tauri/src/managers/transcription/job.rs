@@ -54,7 +54,7 @@ impl TranscriptionManager {
             if !control.proceed() {
                 return Ok(None);
             }
-            let result = self.complete(started, audio, None)?;
+            let result = self.complete(started, audio, None, false)?;
             control.progress(total, total);
             return Ok(Some(result));
         }

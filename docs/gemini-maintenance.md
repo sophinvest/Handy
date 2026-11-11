@@ -80,3 +80,9 @@ The following is the concrete integration surface, rather than a claim that this
 8. Push to the Sophinvest fork only, publish packages only for the tested current commit, and update this changed-file inventory. Never send a PR, issue or comment upstream without separate board authorization.
 
 The transport contains no hard-coded model selection: setup validates the key using ListModels, and dictation uses that verified returned resource name. Future Google API changes are confined to the transport and model-discovery tests.
+
+## Live-source integration
+
+Version 0.10.0-gemini.3 adds `crates/gemini-transcription/src/live.rs` (WebSocket protocol), `pieces.rs` (pause boundaries and quota window), and `src-tauri/src/gemini_stream.rs` (one network/VAD worker and recovery progress). It reuses the existing StreamTextEvent overlay renderer; no new paste implementation or upstream streaming engine is added. Existing integration files in the inventory gain small branches for recording callback selection, cloud finalization/cancellation, key discovery, configuration and shared settings. The file-transcription job explicitly bypasses the active recording session. Updater behavior stays disabled.
+
+On an upstream merge, check that `CaptureSink` still calls the cloud callback with every valid sample and that its callback is non-blocking. Verify cloud cancellation closes the channel, finish drains all delivered samples, and only recording completion consumes a cloud session. Preserve the private recovery offset/prefix and the rate limiter across retries. Keep unary upload size bounds independent from the maximum saved-recording duration. Never silently commit a speculative interim transcript.

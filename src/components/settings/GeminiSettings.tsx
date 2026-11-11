@@ -13,6 +13,11 @@ type Status = {
   configured: boolean;
   credential_storage: "keyring" | "file";
   model: string | null;
+  live_model: string | null;
+  mode: string;
+  rpm: number | null;
+  rpd: number | null;
+  requests_today: number;
   fallback: boolean;
   fallback_model: string;
   pending: number;
@@ -30,10 +35,16 @@ export const GeminiSettings: React.FC<{
   const [message, setMessage] = useState("");
   const [preview, setPreview] = useState("");
   const [localModel, setLocalModel] = useState("");
+  const [mode, setMode] = useState("auto");
+  const [rpm, setRpm] = useState("");
+  const [rpd, setRpd] = useState("");
   const refresh = async () => {
     const next = await invoke<Status>("gemini_status");
     setStatus(next);
     setLocalModel(next.fallback_model);
+    setMode(next.mode);
+    setRpm(next.rpm?.toString() ?? "");
+    setRpd(next.rpd?.toString() ?? "");
   };
   useEffect(() => {
     if (disabled) return;
@@ -131,6 +142,71 @@ export const GeminiSettings: React.FC<{
               : "gemini.choose",
           )}
         </button>
+        <p className="text-sm">
+          {t("gemini.liveModel", {
+            model: status?.live_model ?? t("gemini.liveUnavailable"),
+          })}
+        </p>
+        <label className="block text-sm">
+          {t("gemini.mode")}
+          <select
+            className="block border border-line rounded p-2 w-full"
+            value={mode}
+            disabled={locked}
+            onChange={(e) => setMode(e.target.value)}
+          >
+            <option value="auto">{t("gemini.modeAuto")}</option>
+            <option value="chunks">{t("gemini.modeChunks")}</option>
+            <option value="single">{t("gemini.modeSingle")}</option>
+          </select>
+        </label>
+        <p className="text-sm text-ink-2">{t("gemini.quotaHint")}</p>
+        <label className="block text-sm">
+          {t("gemini.rpm")}
+          <input
+            className="block border border-line rounded p-2 w-full"
+            type="number"
+            min="1"
+            value={rpm}
+            disabled={locked}
+            onChange={(e) => setRpm(e.target.value)}
+          />
+        </label>
+        <label className="block text-sm">
+          {t("gemini.rpd")}
+          <input
+            className="block border border-line rounded p-2 w-full"
+            type="number"
+            min="1"
+            value={rpd}
+            disabled={locked}
+            onChange={(e) => setRpd(e.target.value)}
+          />
+        </label>
+        <button
+          className="border border-line rounded px-3 py-2"
+          disabled={locked}
+          onClick={() =>
+            run(async () => {
+              await invoke("gemini_configure_stream", {
+                mode,
+                rpm: rpm ? Number(rpm) : null,
+                rpd: rpd ? Number(rpd) : null,
+              });
+            })
+          }
+        >
+          {t("gemini.saveMode")}
+        </button>
+        <p className="text-sm">
+          {t("gemini.usage", { count: status?.requests_today ?? 0 })}
+        </p>
+        {status?.rpd && status.requests_today >= status.rpd * 0.8 ? (
+          <p role="alert" className="text-sm">
+            {t("gemini.nearQuota")}
+          </p>
+        ) : null}
+        <p className="text-sm text-ink-2">{t("gemini.pasteRelease")}</p>
         <label className="flex items-center gap-2 text-sm">
           <input
             type="checkbox"

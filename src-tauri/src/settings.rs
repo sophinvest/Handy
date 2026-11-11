@@ -437,6 +437,14 @@ pub struct AppSettings {
     #[serde(default)]
     pub gemini_model: Option<String>,
     #[serde(default)]
+    pub gemini_live_model: Option<String>,
+    #[serde(default = "default_gemini_mode")]
+    pub gemini_mode: String,
+    #[serde(default)]
+    pub gemini_rpm: Option<u32>,
+    #[serde(default)]
+    pub gemini_rpd: Option<u32>,
+    #[serde(default)]
     pub gemini_fallback: bool,
     #[serde(default)]
     pub gemini_fallback_model: String,
@@ -1031,6 +1039,10 @@ pub fn get_default_settings() -> AppSettings {
         whats_new_last_seen_version: default_whats_new_last_seen_version(),
         selected_model: "".to_string(),
         gemini_model: None,
+        gemini_live_model: None,
+        gemini_mode: default_gemini_mode(),
+        gemini_rpm: None,
+        gemini_rpd: None,
         gemini_fallback: false,
         gemini_fallback_model: String::new(),
         onboarding_completed: false,
@@ -2174,4 +2186,8 @@ mod tests {
         assert!(!linux_self_update_possible(Some(BundleKind::Other), all));
         assert!(!linux_self_update_possible(None, all));
     }
+}
+
+fn default_gemini_mode() -> String {
+    "auto".into()
 }

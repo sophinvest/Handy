@@ -1,5 +1,7 @@
-//! Batch-only Gemini transport. No key discovery, model guesses, local inference,
+//! Gemini audio transport. No key discovery, model guesses, local inference,
 //! redirects, automatic retries, or billing-project changes.
+pub mod live;
+pub mod pieces;
 pub mod secure_file;
 
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -32,7 +34,7 @@ impl fmt::Display for Error {
             Self::Auth => "Gemini key was rejected. Check the key in Settings",
             Self::Unavailable => "Gemini could not transcribe this clip",
             Self::InvalidAudio => "Recording contains invalid audio",
-            Self::TooLong => "Gemini clips must be five minutes or shorter",
+            Self::TooLong => "Each Gemini upload must be five minutes or shorter",
             Self::Empty => "Gemini returned no complete transcript",
             Self::ModelMissing => {
                 "No compatible Gemini Transcribe model was returned by ListModels"
@@ -117,6 +119,12 @@ impl Gemini {
     }
     /// Run only on explicit key save / refresh, never on every dictation.
     pub fn models(&self, key: &str) -> Result<Vec<String>, Error> {
+        self.discover(key, false)
+    }
+    pub fn live_models(&self, key: &str) -> Result<Vec<String>, Error> {
+        self.discover(key, true)
+    }
+    fn discover(&self, key: &str, live: bool) -> Result<Vec<String>, Error> {
         let mut token = String::new();
         let mut found = Vec::new();
         for _ in 0..10 {
@@ -133,8 +141,22 @@ impl Gemini {
                     if let Some(name) = model["name"].as_str() {
                         let compatible = model["supportedGenerationMethods"]
                             .as_array()
-                            .is_some_and(|m| m.iter().any(|v| v == "generateContent"));
-                        if compatible && transcription_model(name) {
+                            .is_some_and(|m| {
+                                m.iter().any(|v| {
+                                    v == if live {
+                                        "bidiGenerateContent"
+                                    } else {
+                                        "generateContent"
+                                    }
+                                })
+                            });
+                        if compatible
+                            && if live {
+                                live::valid_model(name)
+                            } else {
+                                transcription_model(name)
+                            }
+                        {
                             found.push(name.to_string());
                         }
                     }
@@ -160,12 +182,23 @@ impl Gemini {
         wav: &[u8],
         words: &[String],
     ) -> Result<String, Error> {
+        self.transcribe_context(key, model, wav, words, "")
+    }
+    pub fn transcribe_context(
+        &self,
+        key: &str,
+        model: &str,
+        wav: &[u8],
+        words: &[String],
+        previous: &str,
+    ) -> Result<String, Error> {
         if !transcription_model(model) {
             return Err(Error::ModelMissing);
         }
         let body = json!({
             "contents": [{"role": "user", "parts": [
-                {"inlineData": {"mimeType": "audio/wav", "data": STANDARD.encode(wav)}}
+                {"inlineData": {"mimeType": "audio/wav", "data": STANDARD.encode(wav)}},
+                {"text": format!("Transcribe only this audio verbatim. Previous sentence for context only; do not repeat it: {}", previous)}
             ]}],
             "generationConfig": {"audioTranscriptionConfig": {
                 "mode": "VERBATIM",

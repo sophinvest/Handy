@@ -1074,13 +1074,22 @@ impl AudioRecordingManager {
                 self.lend_vad()?,
                 vad_policy,
                 Arc::clone(&self.on_levels),
-                Arc::clone(&self.on_audio),
+                if vad_policy == VadPolicy::Cloud
+                    && get_settings(&self.app_handle).gemini_mode != "single"
+                {
+                    crate::gemini_stream::begin(&self.app_handle).map_err(anyhow::Error::msg)?
+                } else {
+                    Arc::clone(&self.on_audio)
+                },
                 ready_tx,
             );
 
             let recorder = self.recorder.lock().unwrap();
             let Some(microphone) = recorder.as_ref() else {
                 self.return_vad(sink.into_vad());
+                if vad_policy == VadPolicy::Cloud {
+                    crate::gemini_stream::cancel();
+                }
                 return Err(anyhow::anyhow!("Recorder not available"));
             };
             match microphone.recorder.start(sink) {
@@ -1101,6 +1110,9 @@ impl AudioRecordingManager {
                 }
                 Err(StartError { error, sink }) => {
                     self.return_vad(sink.into_vad());
+                    if vad_policy == VadPolicy::Cloud {
+                        crate::gemini_stream::cancel();
+                    }
                     if reopened || error.kind() == ErrorKind::AlreadyRecording {
                         return Err(anyhow::Error::new(error).context("Failed to start recorder"));
                     }

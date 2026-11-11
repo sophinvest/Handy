@@ -19,6 +19,12 @@ use tauri::{AppHandle, Emitter, Manager};
 pub const MODEL_ID: &str = "google-gemini-cloud";
 static REQUEST: Mutex<()> = Mutex::new(());
 pub fn idle_guard() -> Result<std::sync::MutexGuard<'static, ()>, String> {
+    if crate::gemini_stream::active() {
+        return Err("Finish the cloud recording first".into());
+    }
+    request_guard()
+}
+pub(crate) fn request_guard() -> Result<std::sync::MutexGuard<'static, ()>, String> {
     REQUEST
         .try_lock()
         .map_err(|_| "Finish the current Gemini request first".into())
@@ -34,7 +40,7 @@ fn private_key_path(app: &AppHandle) -> Result<PathBuf, String> {
         .join("gemini-credentials")
         .join("api-key"))
 }
-fn api_key(app: &AppHandle) -> Result<String, String> {
+pub(crate) fn api_key(app: &AppHandle) -> Result<String, String> {
     // A private file represents the last save when Secret Service was locked or
     // missing. Prefer it to an older keychain entry until a later successful save.
     #[cfg(target_os = "linux")]
@@ -94,7 +100,7 @@ pub fn model_info() -> ModelInfo {
         is_downloaded: true, is_downloading: false, partial_size: 0,
         accuracy_score: 0.0, speed_score: 0.0, supports_translation: false,
         is_recommended: false, supported_languages: vec![], supports_language_selection: false,
-        is_custom: false, supports_streaming: false, supports_language_detection: false,
+        is_custom: false, supports_streaming: true, supports_language_detection: false,
     }
 }
 fn pending_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -183,6 +189,7 @@ fn upload(app: &AppHandle, wav: &[u8]) -> Result<String, String> {
         .gemini_model
         .ok_or("Save your key to verify an available Gemini Transcribe model")?;
     let key = api_key(app)?;
+    crate::gemini_stream::reserve(app)?;
     Gemini::new()
         .map_err(|e| e.to_string())?
         .transcribe(&key, &model, wav, &s.custom_words)
@@ -193,6 +200,7 @@ fn upload(app: &AppHandle, wav: &[u8]) -> Result<String, String> {
 pub fn transcribe(
     app: &AppHandle,
     samples: &[f32],
+    recording: bool,
 ) -> Result<
     (
         Option<std::sync::MutexGuard<'static, ()>>,
@@ -201,11 +209,38 @@ pub fn transcribe(
     ),
     String,
 > {
+    let streamed = if recording {
+        crate::gemini_stream::finish(samples.len())
+    } else {
+        None
+    };
     let guard = REQUEST.try_lock().ok();
     let path = save(app, samples)?;
     let result = (|| {
         if guard.is_none() {
             return Err("Another Gemini request is running".to_string());
+        }
+        if let Some((result, progress)) = streamed {
+            if result.is_err() && progress.offset > 0 {
+                let body = serde_json::to_vec(&progress)
+                    .map_err(|_| "Cannot save piece recovery progress")?;
+                let sidecar = path.with_extension("json");
+                let mut options = fs::OpenOptions::new();
+                options.write(true).create_new(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    options.mode(0o600);
+                }
+                use std::io::Write;
+                let mut f = options
+                    .open(sidecar)
+                    .map_err(|_| "Cannot save piece recovery progress")?;
+                f.write_all(&body)
+                    .and_then(|_| f.sync_all())
+                    .map_err(|_| "Cannot save piece recovery progress")?;
+            }
+            return result;
         }
         let wav = handy_gemini::encode_wav(samples).map_err(|e| e.to_string())?;
         upload(app, &wav)
@@ -223,6 +258,11 @@ pub struct Status {
     configured: bool,
     credential_storage: String,
     model: Option<String>,
+    live_model: Option<String>,
+    mode: String,
+    rpm: Option<u32>,
+    rpd: Option<u32>,
+    requests_today: u32,
     fallback: bool,
     fallback_model: String,
     pending: usize,
@@ -236,6 +276,11 @@ pub async fn gemini_status(app: AppHandle) -> Result<Status, String> {
             configured: api_key(&app).is_ok(),
             credential_storage: credential_storage(&app).into(),
             model: s.gemini_model,
+            live_model: s.gemini_live_model,
+            mode: s.gemini_mode,
+            rpm: s.gemini_rpm,
+            rpd: s.gemini_rpd,
+            requests_today: crate::gemini_stream::usage(&app),
             fallback: s.gemini_fallback,
             fallback_model: s.gemini_fallback_model,
             pending: pending(&app)?.len(),
@@ -259,9 +304,14 @@ pub async fn gemini_save_key(app: AppHandle, key: String) -> Result<Vec<String>,
             .map_err(|e| e.to_string())?
             .models(key)
             .map_err(|e| e.to_string())?;
+        let live_models = Gemini::new()
+            .map_err(|e| e.to_string())?
+            .live_models(key)
+            .unwrap_or_default();
         store_key(&app, key)?;
         let mut s = get_settings(&app);
         s.gemini_model = Some(models[0].clone());
+        s.gemini_live_model = live_models.first().cloned();
         write_settings(&app, s);
         Ok(models)
     })
@@ -305,12 +355,94 @@ pub fn retry(app: &AppHandle, paste: bool) -> Result<String, String> {
     if fs::metadata(&path)
         .map_err(|_| "Cannot read saved clip")?
         .len()
-        > 44 + (handy_gemini::MAX_SAMPLES * 2) as u64
+        > 44 + (16_000 * 3600 * 2) as u64
     {
-        return Err("Saved clip exceeds five minutes. Open the saved clips folder and split it before retrying".into());
+        return Err(
+            "Saved clip exceeds the one-hour recovery limit. Open the saved clips folder".into(),
+        );
     }
     let wav = fs::read(&path).map_err(|_| "Cannot read saved clip")?;
-    let text = upload(app, &wav).map_err(|e| failed(app, e))?;
+    let recovery = path.with_extension("json");
+    let mut progress: crate::gemini_stream::Progress = if recovery.exists() {
+        serde_json::from_slice(&fs::read(&recovery).map_err(|_| "Cannot read recovery progress")?)
+            .map_err(|_| "Invalid recovery progress; clip is preserved")?
+    } else {
+        Default::default()
+    };
+    let reader =
+        hound::WavReader::new(std::io::Cursor::new(&wav)).map_err(|_| "Cannot read saved WAV")?;
+    let samples = reader
+        .into_samples::<i16>()
+        .map(|s| s.map(|n| n as f32 / 32767.0))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| "Cannot read saved WAV samples")?;
+    if progress.offset > samples.len() {
+        return Err("Recovery progress is outside the saved clip".into());
+    }
+    if progress.offset < samples.len() {
+        use crate::audio_toolkit::{SileroVad, SpeechScorer};
+        let path = app
+            .path()
+            .resolve(
+                "resources/models/silero-vad-v6.2-F32.gguf",
+                tauri::path::BaseDirectory::Resource,
+            )
+            .map_err(|_| "Cannot locate pause detector")?;
+        let mut vad = SileroVad::new(path, 0.3).map_err(|_| "Cannot load pause detector")?;
+        let tail = &samples[progress.offset..];
+        let mut cutter = handy_gemini::pieces::Cutter::default();
+        let mut cut = tail.len();
+        for frame in tail.chunks_exact(handy_gemini::pieces::FRAME) {
+            if let Some(n) = cutter.push(
+                frame,
+                vad.score(frame).map_err(|_| "Pause detection failed")?[0] > 0.3,
+            ) {
+                cut = n;
+                break;
+            }
+        }
+        let encoded = handy_gemini::encode_wav(&tail[..cut]).map_err(|e| e.to_string())?;
+        let s = get_settings(app);
+        let key = api_key(app)?;
+        let model = s.gemini_model.ok_or("Verify your key first")?;
+        crate::gemini_stream::reserve(app)?;
+        let part = Gemini::new()
+            .map_err(|e| e.to_string())?
+            .transcribe_context(
+                &key,
+                &model,
+                &encoded,
+                &s.custom_words,
+                &handy_gemini::pieces::last_sentence(&progress.text),
+            )
+            .map_err(|e| failed(app, e))?;
+        if !progress.text.is_empty() {
+            progress.text.push(' ');
+        }
+        progress.text.push_str(&part);
+        progress.offset += cut;
+        // Recovery updates are atomic and private, just like the saved WAV.
+        use std::io::Write;
+        let next = recovery.with_extension("json.tmp");
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut f = options
+            .open(&next)
+            .map_err(|_| "Cannot save recovery progress")?;
+        f.write_all(&serde_json::to_vec(&progress).map_err(|_| "Cannot save recovery progress")?)
+            .and_then(|_| f.sync_all())
+            .map_err(|_| "Cannot save recovery progress")?;
+        fs::rename(next, &recovery).map_err(|_| "Cannot save recovery progress")?;
+        if progress.offset < samples.len() {
+            return Err("One saved piece transcribed. The complete clip is still saved. Retry again when quota permits; nothing has been pasted yet".into());
+        }
+    }
+    let text = progress.text;
     if paste {
         crate::utils::paste(text.clone(), app.clone())
             .map_err(|_| "Paste failed. The clip is still saved")?;
@@ -318,6 +450,9 @@ pub fn retry(app: &AppHandle, paste: bool) -> Result<String, String> {
     // The settings preview may be copied or pasted later, so keep its recording.
     if paste {
         fs::remove_file(path).map_err(|_| "Text pasted, but saved clip could not be removed")?;
+        if recovery.exists() {
+            let _ = fs::remove_file(recovery);
+        }
     }
     Ok(text)
 }

@@ -193,3 +193,48 @@ fn sixty_seconds_survive_delayed_consumer_without_sample_loss() {
     let wav = encode_wav(&actual).unwrap();
     assert_eq!(wav.len(), 44 + 960_000 * 2);
 }
+
+#[test]
+fn live_discovery_requires_returned_live_model_and_bidi_method() {
+    let (addr, rx, h) = server(
+        200,
+        r#"{"models":[{"name":"models/gemini-3.5-transcribe-live","supportedGenerationMethods":["bidiGenerateContent"]},{"name":"models/gemini-3.5-transcribe","supportedGenerationMethods":["generateContent"]}]}"#,
+    );
+    assert_eq!(
+        Gemini::at(&addr, TIMEOUT)
+            .unwrap()
+            .live_models("fixture-key")
+            .unwrap(),
+        vec!["models/gemini-3.5-transcribe-live"]
+    );
+    rx.recv().unwrap();
+    h.join().unwrap();
+}
+#[test]
+fn previous_sentence_is_context_and_not_part_of_audio() {
+    let (addr, rx, h) = server(
+        200,
+        r#"{"candidates":[{"finishReason":"STOP","content":{"parts":[{"text":"Next sentence."}]}}]}"#,
+    );
+    let wav = encode_wav(&[0.2; 160]).unwrap();
+    assert_eq!(
+        Gemini::at(&addr, TIMEOUT)
+            .unwrap()
+            .transcribe_context(
+                "fixture-key",
+                "models/gemini-3.5-transcribe",
+                &wav,
+                &[],
+                "Jean at Sophinvest"
+            )
+            .unwrap(),
+        "Next sentence."
+    );
+    let r = rx.recv().unwrap();
+    h.join().unwrap();
+    let v: Value = serde_json::from_str(r.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    assert!(v["contents"][0]["parts"][1]["text"]
+        .as_str()
+        .unwrap()
+        .contains("Jean at Sophinvest"));
+}

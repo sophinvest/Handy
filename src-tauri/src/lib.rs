@@ -11,6 +11,7 @@ mod clipboard;
 mod commands;
 pub mod engine_supervisor;
 mod gemini;
+mod gemini_stream;
 mod helpers;
 mod input;
 mod language_detection;
@@ -773,6 +774,7 @@ pub fn run(cli_args: CliArgs) {
             commands::models::get_available_models,
             commands::models::get_model_info,
             commands::models::download_model,
+            gemini_stream::gemini_configure_stream,
             gemini::gemini_status,
             gemini::gemini_save_key,
             gemini::gemini_set_fallback,

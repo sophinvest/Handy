@@ -958,6 +958,7 @@ impl TranscriptionManager {
     /// Abandon any live decode without producing text (e.g. on cancel). A
     /// chunk already decoding finishes; audio queued behind it is dropped.
     pub fn cancel_stream(&self) {
+        crate::gemini_stream::cancel();
         if let Some(route) = self.router.take() {
             route.cancelled.store(true, Ordering::Release);
             let _ = route.tx.send(StreamCmd::Cancel);
@@ -985,7 +986,7 @@ impl TranscriptionManager {
     /// Transcribe a whole clip in batch: a re-transcribed history entry, or
     /// a file from the CLI.
     pub fn transcribe(&self, audio: Vec<f32>) -> Result<String> {
-        Ok(self.complete(Instant::now(), audio, None)?.text)
+        Ok(self.complete(Instant::now(), audio, None, false)?.text)
     }
 
     /// Transcribe a finished recording: what its live decode produced, or a
@@ -993,7 +994,7 @@ impl TranscriptionManager {
     pub fn transcribe_recording(&self, samples: Vec<f32>) -> Result<Transcription> {
         let started = Instant::now();
         let live = self.finalize_live(samples.len())?;
-        self.complete(started, samples, live)
+        self.complete(started, samples, live, true)
     }
 
     /// The final text of one transcription, from its live result or else a
@@ -1003,11 +1004,13 @@ impl TranscriptionManager {
         started: Instant,
         audio: Vec<f32>,
         live: Option<RunOutcome>,
+        recording: bool,
     ) -> Result<Transcription> {
         let cloud_settings = get_settings(&self.app_handle);
         if cloud_settings.selected_model == crate::gemini::MODEL_ID {
             let (_request_guard, path, result) =
-                crate::gemini::transcribe(&self.app_handle, &audio).map_err(anyhow::Error::msg)?;
+                crate::gemini::transcribe(&self.app_handle, &audio, recording)
+                    .map_err(anyhow::Error::msg)?;
             match result {
                 Ok(text) => {
                     return Ok(Transcription {
