@@ -24,6 +24,7 @@ The following is the concrete integration surface, rather than a claim that this
 - [`src-tauri/src/actions.rs`](../src-tauri/src/actions.rs)
 - [`src-tauri/src/audio_toolkit/audio/sink.rs`](../src-tauri/src/audio_toolkit/audio/sink.rs)
 - [`src-tauri/src/audio_toolkit/audio/sink/tests.rs`](../src-tauri/src/audio_toolkit/audio/sink/tests.rs)
+- [`src-tauri/src/audio_toolkit/vad/silero.rs`](../src-tauri/src/audio_toolkit/vad/silero.rs)
 - [`src-tauri/src/commands/models.rs`](../src-tauri/src/commands/models.rs)
 - [`src-tauri/src/lib.rs`](../src-tauri/src/lib.rs)
 - [`src-tauri/src/managers/audio.rs`](../src-tauri/src/managers/audio.rs)
@@ -86,3 +87,5 @@ The transport contains no hard-coded model selection: setup validates the key us
 Version 0.10.0-gemini.3 adds `crates/gemini-transcription/src/live.rs` (WebSocket protocol), `pieces.rs` (pause boundaries and quota window), and `src-tauri/src/gemini_stream.rs` (one network/VAD worker and recovery progress). It reuses the existing StreamTextEvent overlay renderer; no new paste implementation or upstream streaming engine is added. Existing integration files in the inventory gain small branches for recording callback selection, cloud finalization/cancellation, key discovery, configuration and shared settings. The file-transcription job explicitly bypasses the active recording session. Updater behavior stays disabled.
 
 On an upstream merge, check that `CaptureSink` still calls the cloud callback with every valid sample and that its callback is non-blocking. Verify cloud cancellation closes the channel, finish drains all delivered samples, and only recording completion consumes a cloud session. Preserve the private recovery offset/prefix and the rate limiter across retries. Keep unary upload size bounds independent from the maximum saved-recording duration. Never silently commit a speculative interim transcript.
+
+Native review for the live Ubuntu release transfers one exclusive request guard from session creation to its worker and back to finalization. Cancelling does not unlock a still-running request, and a failed recording start returns its borrowed detector. Cloud samples are never padded after capture; final sample-count validation compares the original recording exactly. Live rollover failures replay the complete buffered recording through pause pieces, preserving unary progress for recovery. The cloud Live overlay remains selected through finalization and respects the disabled-overlay setting. These changes stay within the existing integration files above.

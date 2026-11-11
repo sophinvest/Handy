@@ -1070,17 +1070,25 @@ impl AudioRecordingManager {
             }
 
             let (ready_tx, receiver) = mpsc::channel();
+            let vad = self.lend_vad()?;
+            let on_audio = if vad_policy == VadPolicy::Cloud
+                && get_settings(&self.app_handle).gemini_mode != "single"
+            {
+                match crate::gemini_stream::begin(&self.app_handle) {
+                    Ok(callback) => callback,
+                    Err(error) => {
+                        self.return_vad(vad);
+                        return Err(anyhow::Error::msg(error));
+                    }
+                }
+            } else {
+                Arc::clone(&self.on_audio)
+            };
             let sink = CaptureSink::new(
-                self.lend_vad()?,
+                vad,
                 vad_policy,
                 Arc::clone(&self.on_levels),
-                if vad_policy == VadPolicy::Cloud
-                    && get_settings(&self.app_handle).gemini_mode != "single"
-                {
-                    crate::gemini_stream::begin(&self.app_handle).map_err(anyhow::Error::msg)?
-                } else {
-                    Arc::clone(&self.on_audio)
-                },
+                on_audio,
                 ready_tx,
             );
 
@@ -1323,7 +1331,10 @@ impl AudioRecordingManager {
                 // Pad if very short
                 let s_len = samples.len();
                 // debug!("Got {} samples", s_len);
-                if s_len < WHISPER_SAMPLE_RATE && s_len > 0 {
+                if settings.selected_model != crate::gemini::MODEL_ID
+                    && s_len < WHISPER_SAMPLE_RATE
+                    && s_len > 0
+                {
                     let mut padded = samples;
                     padded.resize(WHISPER_SAMPLE_RATE * 5 / 4, 0.0);
                     Some(padded)

@@ -606,7 +606,12 @@ impl ShortcutAction for TranscribeAction {
         // pill instead of an oversized transparent live window.
         let overlay_started = Instant::now();
         match settings.overlay_style {
-            _ if cloud && settings.gemini_mode != "single" => utils::show_streaming_overlay(app),
+            _ if cloud
+                && settings.gemini_mode != "single"
+                && settings.overlay_style != OverlayStyle::None =>
+            {
+                utils::show_streaming_overlay(app)
+            }
             OverlayStyle::Live if model_supports_streaming => utils::show_streaming_overlay(app),
             OverlayStyle::Live | OverlayStyle::Minimal => show_recording_overlay(app),
             OverlayStyle::None => {} // show_overlay_state no-ops on None anyway
@@ -725,10 +730,14 @@ impl ShortcutAction for TranscribeAction {
         // the larger panel, but it still switches from listening to a working
         // spinner while the stream finalizes. Non-streaming paths use the
         // compact transcribing pill (None no-ops in show_*).
-        let style = get_settings(app).overlay_style;
+        let settings = get_settings(app);
+        let style = settings.overlay_style;
         // Capture this before finalizing the stream so every later working state
         // targets the same overlay that was shown for this transcription.
-        let use_streaming_overlay = should_use_streaming_overlay(style, tm.is_streaming());
+        let use_streaming_overlay = (settings.selected_model == crate::gemini::MODEL_ID
+            && settings.gemini_mode != "single"
+            && style != OverlayStyle::None)
+            || should_use_streaming_overlay(style, tm.is_streaming());
         if use_streaming_overlay {
             tm.emit_stream_working(StreamWorkKind::Transcribing);
         } else {

@@ -28,7 +28,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use tauri_specta::Event;
 struct Session {
     tx: SyncSender<Vec<f32>>,
-    result: Receiver<Result<String, String>>,
+    result: Receiver<(Result<String, String>, gemini::RequestGuard)>,
     stop: Arc<AtomicBool>,
     lost: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
@@ -65,6 +65,7 @@ pub fn begin(app: &AppHandle) -> Result<crate::audio_toolkit::audio::AudioFrameC
     if slot.is_some() {
         return Err("Finish the current cloud recording first".into());
     }
+    let guard = gemini::request_guard()?;
     let (tx, rx) = mpsc::sync_channel::<Vec<f32>>(512); // ~16 s; bounded, no capture wait.
     let (reply, result) = mpsc::channel();
     let stop = Arc::new(AtomicBool::new(false));
@@ -76,10 +77,13 @@ pub fn begin(app: &AppHandle) -> Result<crate::audio_toolkit::audio::AudioFrameC
     let wp = progress.clone();
     let (ws, wl, wc) = (stop.clone(), lost.clone(), cancel.clone());
     let app = app.clone();
-    std::thread::spawn(move || {
-        let answer = worker(&app, rx, &ws, &wl, &wc, &wr, &wp);
-        let _ = reply.send(answer);
-    });
+    std::thread::Builder::new()
+        .name("gemini-cloud".into())
+        .spawn(move || {
+            let answer = worker(&app, rx, &ws, &wl, &wc, &wr, &wp);
+            let _ = reply.send((answer, guard));
+        })
+        .map_err(|_| "Cannot start cloud worker")?;
     let sender = tx.clone();
     let overflow = lost.clone();
     *slot = Some(Session {
@@ -115,18 +119,35 @@ pub fn cancel() {
         }
     }
 }
-pub fn finish(samples: usize) -> Option<(Result<String, String>, Progress)> {
+pub fn finish(
+    samples: usize,
+) -> Option<(
+    Result<String, String>,
+    Progress,
+    Option<gemini::RequestGuard>,
+)> {
     let session = SESSION.lock().ok()?.take()?;
+    Some(finish_session(session, samples))
+}
+fn finish_session(
+    session: Session,
+    samples: usize,
+) -> (
+    Result<String, String>,
+    Progress,
+    Option<gemini::RequestGuard>,
+) {
     session.stop.store(true, Ordering::Release);
     drop(session.tx);
     // Each network operation is bounded. The worker must not hold an unbounded
     // finalization queue on release. Deferred quota pieces stay saved for retry.
-    let result = session
+    let (result, guard) = session
         .result
         .recv_timeout(Duration::from_secs(25))
+        .map(|(result, guard)| (result, Some(guard)))
         .unwrap_or_else(|_| {
             session.cancel.store(true, Ordering::Release);
-            Err("Cloud finalization timed out".into())
+            (Err("Cloud finalization timed out".into()), None)
         });
     let progress = session
         .progress
@@ -134,20 +155,22 @@ pub fn finish(samples: usize) -> Option<(Result<String, String>, Progress)> {
         .map(|p| p.clone())
         .unwrap_or_default();
     if session.lost.load(Ordering::Acquire) {
-        return Some((
+        return (
             Err("Cloud preview fell behind; complete recording saved for retry".into()),
             progress,
-        ));
+            guard,
+        );
     }
     if result.is_ok() && session.received.load(Ordering::Acquire) != samples {
-        return Some((
+        return (
             Err(
                 "Cloud stream sample count did not match the recording. Complete clip saved".into(),
             ),
             progress,
-        ));
+            guard,
+        );
     }
-    Some((result, progress))
+    (result, progress, guard)
 }
 fn load_usage(app: &AppHandle) -> (String, u32) {
     let day = handy_gemini::pieces::pacific_day();
@@ -245,7 +268,6 @@ fn worker(
     received: &AtomicUsize,
     progress: &Mutex<Progress>,
 ) -> Result<String, String> {
-    let _guard = gemini::request_guard()?;
     let settings = get_settings(app);
     let key = gemini::api_key(app)?;
     let model = settings.gemini_model.ok_or("Verify your key in Settings")?;
@@ -340,14 +362,33 @@ fn worker(
                 // Reconnect only at a finalized pause, before the 10 min limit.
                 // Audio arriving during finalization remains in the channel.
                 if (l.since.elapsed() >= Duration::from_secs(540) || l.go_away) && silence >= 6400 {
-                    match l.finish() {
-                        Ok(t)=> {
+                    let next = match l.finish() {
+                        Ok(t) => {
+                            if !prefix.is_empty()
+                                && !prefix.ends_with(char::is_whitespace)
+                                && !t.starts_with(char::is_whitespace)
+                            {
+                                prefix.push(' ');
+                            }
                             prefix.push_str(&t);
-                            let next=settings.gemini_live_model.as_deref().and_then(|m|Live::connect(&key,m,&settings.custom_words).ok());
-                            if next.is_none() { return Err("Live session could not reconnect. Complete clip saved for retry".into()); }
-                            live=next;
-                        },
-                        Err(_)=>return Err("Live session did not finalize at rollover. Complete clip saved for retry".into()),
+                            settings
+                                .gemini_live_model
+                                .as_deref()
+                                .and_then(|m| Live::connect(&key, m, &settings.custom_words).ok())
+                        }
+                        Err(_) => None,
+                    };
+                    live = next;
+                    if live.is_none() {
+                        prefix.clear();
+                        text.clear();
+                        scanned = 0;
+                        sent = 0;
+                        cut_base = 0;
+                        boundary = 0;
+                        cutter = Cutter::default();
+                        vad.reset();
+                        preview(app, "", "");
                     }
                 }
             }
@@ -373,7 +414,15 @@ fn worker(
             );
             if finalizing {
                 match l.finish() {
-                    Ok(t) => return Ok(format!("{prefix}{t}")),
+                    Ok(t) => {
+                        if !prefix.is_empty()
+                            && !prefix.ends_with(char::is_whitespace)
+                            && !t.starts_with(char::is_whitespace)
+                        {
+                            prefix.push(' ');
+                        }
+                        return Ok(format!("{prefix}{t}"));
+                    }
                     Err(_) => {
                         live = None;
                         prefix.clear();
@@ -458,6 +507,69 @@ mod tests {
     use super::*;
     use crate::audio_toolkit::{CaptureSink, CaptureVad, VadPolicy};
     use handy_recorder::{AudioChunk, Sink};
+    #[test]
+    fn session_drains_after_capture_disconnect_and_keeps_request_ownership() {
+        let guard = gemini::request_guard().unwrap();
+        let (tx, rx) = mpsc::sync_channel(8);
+        let (reply, result) = mpsc::channel();
+        let received = Arc::new(AtomicUsize::new(0));
+        let count = received.clone();
+        let lost = Arc::new(AtomicBool::new(false));
+        let callback = feed_callback(tx.clone(), lost.clone());
+        callback(&[0.0, 0.25]);
+        callback(&[-0.5]);
+        drop(callback); // CaptureSink::finish drops the recorder's sender.
+        let worker = std::thread::spawn(move || {
+            for frame in rx {
+                count.fetch_add(frame.len(), Ordering::Release);
+            }
+            reply.send((Ok("complete".into()), guard)).ok();
+        });
+        let session = Session {
+            tx,
+            result,
+            stop: Arc::new(AtomicBool::new(false)),
+            lost,
+            cancel: Arc::new(AtomicBool::new(false)),
+            received,
+            progress: Arc::new(Mutex::new(Progress::default())),
+        };
+        let (answer, _, ownership) = finish_session(session, 3);
+        assert_eq!(answer.unwrap(), "complete");
+        assert!(gemini::request_guard().is_err());
+        drop(ownership);
+        let guard = gemini::request_guard().unwrap();
+        worker.join().unwrap();
+        // Cancellation does not unlock an operation still running on a worker.
+        let (release, wait) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            wait.recv().unwrap();
+            drop(guard);
+        });
+        assert!(gemini::request_guard().is_err());
+        release.send(()).unwrap();
+        worker.join().unwrap();
+        let guard = gemini::request_guard().unwrap();
+        let (tx, _) = mpsc::sync_channel(1);
+        let (reply, result) = mpsc::channel();
+        reply.send((Ok("incomplete".into()), guard)).ok();
+        let session = Session {
+            tx,
+            result,
+            stop: Arc::new(AtomicBool::new(false)),
+            lost: Arc::new(AtomicBool::new(false)),
+            cancel: Arc::new(AtomicBool::new(false)),
+            received: Arc::new(AtomicUsize::new(2)),
+            progress: Arc::new(Mutex::new(Progress {
+                offset: 2,
+                text: "prefix".into(),
+            })),
+        };
+        let (answer, progress, _ownership) = finish_session(session, 3);
+        assert!(answer.unwrap_err().contains("sample count"));
+        assert_eq!(progress.offset, 2);
+        assert_eq!(progress.text, "prefix");
+    }
     #[test]
     fn stalled_cloud_consumer_does_not_truncate_the_recording() {
         let (tx, _receiver) = mpsc::sync_channel(1);

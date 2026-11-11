@@ -12,21 +12,34 @@ use serde::Serialize;
 use std::{
     fs,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 use tauri::{AppHandle, Emitter, Manager};
 
 pub const MODEL_ID: &str = "google-gemini-cloud";
-static REQUEST: Mutex<()> = Mutex::new(());
-pub fn idle_guard() -> Result<std::sync::MutexGuard<'static, ()>, String> {
+static REQUEST: AtomicBool = AtomicBool::new(false);
+/// Exclusive cloud operation ownership, transferable from capture setup to the
+/// worker and back to finalization. Cancellation releases it only on worker exit.
+pub struct RequestGuard;
+impl Drop for RequestGuard {
+    fn drop(&mut self) {
+        REQUEST.store(false, Ordering::Release);
+    }
+}
+pub(crate) fn idle_guard() -> Result<RequestGuard, String> {
+    let guard = request_guard()?;
     if crate::gemini_stream::active() {
         return Err("Finish the cloud recording first".into());
     }
-    request_guard()
+    Ok(guard)
 }
-pub(crate) fn request_guard() -> Result<std::sync::MutexGuard<'static, ()>, String> {
+pub(crate) fn request_guard() -> Result<RequestGuard, String> {
     REQUEST
-        .try_lock()
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .map(|_| RequestGuard)
         .map_err(|_| "Finish the current Gemini request first".into())
 }
 fn key_entry() -> Result<keyring::Entry, String> {
@@ -201,26 +214,19 @@ pub fn transcribe(
     app: &AppHandle,
     samples: &[f32],
     recording: bool,
-) -> Result<
-    (
-        Option<std::sync::MutexGuard<'static, ()>>,
-        PathBuf,
-        Result<String, String>,
-    ),
-    String,
-> {
-    let streamed = if recording {
+) -> Result<(Option<RequestGuard>, PathBuf, Result<String, String>), String> {
+    let mut streamed = if recording {
         crate::gemini_stream::finish(samples.len())
     } else {
         None
     };
-    let guard = REQUEST.try_lock().ok();
+    let guard = streamed
+        .as_mut()
+        .and_then(|(_, _, guard)| guard.take())
+        .or_else(|| request_guard().ok());
     let path = save(app, samples)?;
     let result = (|| {
-        if guard.is_none() {
-            return Err("Another Gemini request is running".to_string());
-        }
-        if let Some((result, progress)) = streamed {
+        if let Some((result, progress, _)) = streamed {
             if result.is_err() && progress.offset > 0 {
                 let body = serde_json::to_vec(&progress)
                     .map_err(|_| "Cannot save piece recovery progress")?;
@@ -241,6 +247,9 @@ pub fn transcribe(
                     .map_err(|_| "Cannot save piece recovery progress")?;
             }
             return result;
+        }
+        if guard.is_none() {
+            return Err("Another Gemini request is running".to_string());
         }
         let wav = handy_gemini::encode_wav(samples).map_err(|e| e.to_string())?;
         upload(app, &wav)
@@ -293,9 +302,7 @@ pub async fn gemini_status(app: AppHandle) -> Result<Status, String> {
 #[specta::specta]
 pub async fn gemini_save_key(app: AppHandle, key: String) -> Result<Vec<String>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let _guard = REQUEST
-            .try_lock()
-            .map_err(|_| "Finish the current Gemini request first")?;
+        let _guard = idle_guard()?;
         let key = key.trim();
         if key.is_empty() {
             return Err("Enter your Gemini API key".into());
@@ -335,9 +342,7 @@ pub fn gemini_set_fallback(app: AppHandle, enabled: bool, model: String) -> Resu
     Ok(())
 }
 pub fn retry(app: &AppHandle, paste: bool) -> Result<String, String> {
-    let _guard = REQUEST
-        .try_lock()
-        .map_err(|_| "Another Gemini request is running")?;
+    let _guard = idle_guard()?;
     if get_settings(app).selected_model != MODEL_ID {
         return Err("Choose Google Gemini before retrying".into());
     }
