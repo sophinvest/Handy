@@ -1,4 +1,4 @@
-name: "Handy Gemini installers"
+name: "Handy Gemini Ubuntu packages"
 on:
   push:
     branches: [main]
@@ -8,13 +8,17 @@ concurrency:
   cancel-in-progress: true
 jobs:
   quality:
-    runs-on: macos-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - name: Install native test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libasound2-dev libssl-dev libgtk-layer-shell-dev libdbus-1-dev libopenblas-dev libvulkan-dev glslc spirv-headers xvfb
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: ./src-tauri -> target
@@ -25,32 +29,27 @@ jobs:
       - run: |
           mkdir -p src-tauri/resources/models
           curl --fail -L -o src-tauri/resources/models/silero-vad-v6.2-F32.gguf https://huggingface.co/handy-computer/silero-vad-v6.2-gguf/resolve/main/silero-vad-v6.2-F32.gguf
-      - run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+      - run: xvfb-run -a cargo test --manifest-path src-tauri/Cargo.toml --lib
+      - name: Synthetic recording buffer under all-core Linux CPU load
+        run: |
+          set -euo pipefail
+          python3 scripts/gemini-cpu-stress.py --seconds 60 &
+          load_pid=$!
+          trap 'kill "$load_pid" 2>/dev/null || true' EXIT
+          sleep 2
+          xvfb-run -a cargo test --manifest-path src-tauri/Cargo.toml cloud_sink_preserves_sixty_seconds_including_silence_and_final_partial_frame -- --nocapture
+          wait "$load_pid"
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
   build:
     permissions:
       contents: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: macos-26
-            args: --target aarch64-apple-darwin --bundles dmg
-            target: aarch64-apple-darwin
-          - platform: macos-latest
-            args: --target x86_64-apple-darwin --bundles dmg
-            target: x86_64-apple-darwin
-          - platform: windows-latest
-            args: --bundles nsis,msi
-            target: x86_64-pc-windows-msvc
     uses: ./.github/workflows/build.yml
     with:
-      platform: ${{ matrix.platform }}
-      target: ${{ matrix.target }}
-      build-args: ${{ matrix.args }}
+      platform: ubuntu-22.04
+      target: x86_64-unknown-linux-gnu
+      build-args: --bundles deb,appimage
       upload-artifacts: true
       sign-binaries: false
-
   release:
     needs: [quality, build]
     runs-on: ubuntu-latest
@@ -63,13 +62,20 @@ jobs:
           pattern: handy-*
           path: release-files
           merge-multiple: true
-      - name: Publish verified preview installers
+      - name: Publish verified Ubuntu preview packages
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
+          set -euo pipefail
           shopt -s globstar nullglob
+          current=$(git ls-remote origin refs/heads/main | cut -f1)
+          test "$current" = "$GITHUB_SHA" || { echo "Superseded build; refusing to publish"; exit 1; }
+          debs=(release-files/**/*.deb)
+          images=(release-files/**/*.AppImage)
+          test "${#debs[@]}" -gt 0
+          test "${#images[@]}" -gt 0
           version=$(node -p 'require("./package.json").version')
           gh release create "v$version" --target "$GITHUB_SHA" --prerelease \
-            --title "Handy Gemini $version" --notes-file docs/gemini-setup.md \
-            release-files/**/*.dmg release-files/**/*.exe release-files/**/*.msi
+            --title "Handy Gemini for Ubuntu $version" --notes-file docs/gemini-setup.md \
+            "${debs[@]}" "${images[@]}"

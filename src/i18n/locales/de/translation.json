@@ -1005,7 +1005,7 @@
     "title": "Google Gemini (cloud)",
     "description": "Records the whole clip, then sends it to Google when you release the key. Local speech models and voice detection stay unloaded. Clips over five minutes are saved for recovery instead of uploaded.",
     "privacy": "Use a key from a Google project with no billing account for free-only service. Google may use free-tier audio to improve its products. Failed recordings stay on this computer until you retry or delete them.",
-    "key": "Gemini API key (saved in the OS keychain)",
+    "key": "Gemini API key",
     "save": "Verify model and save key",
     "verified": "Verified model: {{model}}",
     "choose": "Choose Google Gemini",
@@ -1023,6 +1023,10 @@
     "copied": "Transcript copied. You can paste it into another app. The saved recording remains available.",
     "working": "Working…",
     "settingsError": "Could not read Gemini settings.",
-    "switchError": "Could not switch to Google Gemini."
+    "switchError": "Could not switch to Google Gemini.",
+    "storage": {
+      "keyring": "Key storage: GNOME Keyring / Secret Service.",
+      "file": "Key storage: private file (0600) in Handy’s gemini-credentials folder. Secret Service was unavailable when saving."
+    }
   }
 }

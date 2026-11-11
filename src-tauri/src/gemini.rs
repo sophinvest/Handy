@@ -1,4 +1,5 @@
-//! Google dictation integration. Keys stay in the OS credential store. Failed
+//! Google dictation integration. Keys use Secret Service on Linux, with an
+//! explicitly disclosed mode-600 file fallback if the service cannot save. Failed
 //! clips live outside history retention until the user retries or discards them.
 use crate::managers::{
     audio::AudioRecordingManager,
@@ -26,10 +27,64 @@ fn key_entry() -> Result<keyring::Entry, String> {
     keyring::Entry::new("com.sophinvest.handy.gemini", "api-key")
         .map_err(|_| "OS keychain is unavailable".to_string())
 }
-fn api_key() -> Result<String, String> {
+#[cfg(target_os = "linux")]
+fn private_key_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(crate::portable::app_data_dir(app)
+        .map_err(|_| "Cannot locate Gemini key directory")?
+        .join("gemini-credentials")
+        .join("api-key"))
+}
+fn api_key(app: &AppHandle) -> Result<String, String> {
+    // A private file represents the last save when Secret Service was locked or
+    // missing. Prefer it to an older keychain entry until a later successful save.
+    #[cfg(target_os = "linux")]
+    {
+        let path = private_key_path(app)?;
+        if fs::symlink_metadata(&path).is_ok() {
+            return handy_gemini::secure_file::load(&path).map_err(str::to_string);
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = app;
     key_entry()?
         .get_password()
-        .map_err(|_| "Save your Gemini API key in Settings first".to_string())
+        .map_err(|_| "Save your Gemini API key in Settings first".into())
+}
+fn store_key(app: &AppHandle, key: &str) -> Result<(), String> {
+    if key_entry()
+        .and_then(|entry| {
+            entry
+                .set_password(key)
+                .map_err(|_| "OS keychain could not save the key".to_string())
+        })
+        .is_ok()
+    {
+        #[cfg(target_os = "linux")]
+        {
+            let path = private_key_path(app)?;
+            if path.exists() {
+                fs::remove_file(path).map_err(|_| "New key saved to Secret Service, but the old private key file could not be removed")?;
+            }
+        }
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        handy_gemini::secure_file::save(&private_key_path(app)?, key).map_err(str::to_string)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = app;
+        Err("The OS keychain could not save the key".into())
+    }
+}
+fn credential_storage(app: &AppHandle) -> &'static str {
+    #[cfg(target_os = "linux")]
+    if private_key_path(app).is_ok_and(|p| fs::symlink_metadata(p).is_ok()) {
+        return "file";
+    }
+    let _ = app;
+    "keyring"
 }
 pub fn model_info() -> ModelInfo {
     ModelInfo {
@@ -127,7 +182,7 @@ fn upload(app: &AppHandle, wav: &[u8]) -> Result<String, String> {
     let model = s
         .gemini_model
         .ok_or("Save your key to verify an available Gemini Transcribe model")?;
-    let key = api_key()?;
+    let key = api_key(app)?;
     Gemini::new()
         .map_err(|e| e.to_string())?
         .transcribe(&key, &model, wav, &s.custom_words)
@@ -166,6 +221,7 @@ pub fn transcribe(
 #[derive(Serialize, specta::Type)]
 pub struct Status {
     configured: bool,
+    credential_storage: String,
     model: Option<String>,
     fallback: bool,
     fallback_model: String,
@@ -177,7 +233,8 @@ pub async fn gemini_status(app: AppHandle) -> Result<Status, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let s = get_settings(&app);
         Ok(Status {
-            configured: key_entry()?.get_password().is_ok(),
+            configured: api_key(&app).is_ok(),
+            credential_storage: credential_storage(&app).into(),
             model: s.gemini_model,
             fallback: s.gemini_fallback,
             fallback_model: s.gemini_fallback_model,
@@ -202,10 +259,7 @@ pub async fn gemini_save_key(app: AppHandle, key: String) -> Result<Vec<String>,
             .map_err(|e| e.to_string())?
             .models(key)
             .map_err(|e| e.to_string())?;
-        // No plaintext fallback if the OS credential store fails.
-        key_entry()?
-            .set_password(key)
-            .map_err(|_| "The OS keychain could not save the key")?;
+        store_key(&app, key)?;
         let mut s = get_settings(&app);
         s.gemini_model = Some(models[0].clone());
         write_settings(&app, s);

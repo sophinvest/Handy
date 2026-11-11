@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Handy Gemini",
-  "version": "0.10.0-gemini.1",
-  "identifier": "com.sophinvest.handy",
+  "productName": "Handy",
+  "version": "0.10.0-gemini.2",
+  "identifier": "com.pais.handy",
   "build": {
     "beforeDevCommand": "bun run dev",
     "devUrl": "http://localhost:1420",

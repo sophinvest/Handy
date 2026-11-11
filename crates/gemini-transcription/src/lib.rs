@@ -1,5 +1,7 @@
 //! Batch-only Gemini transport. No key discovery, model guesses, local inference,
 //! redirects, automatic retries, or billing-project changes.
+pub mod secure_file;
+
 use base64::{engine::general_purpose::STANDARD, Engine};
 use reqwest::blocking::Client;
 use serde_json::{json, Value};

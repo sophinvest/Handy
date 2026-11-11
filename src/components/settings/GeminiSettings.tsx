@@ -11,6 +11,7 @@ import { SettingsGroup } from "../ui/SettingsGroup";
 export const GEMINI_ENGINE = "google-gemini-cloud";
 type Status = {
   configured: boolean;
+  credential_storage: "keyring" | "file";
   model: string | null;
   fallback: boolean;
   fallback_model: string;
@@ -100,6 +101,11 @@ export const GeminiSettings: React.FC<{
         >
           {t("gemini.save")}
         </button>
+        {status?.configured && (
+          <p className="text-sm">
+            {t(`gemini.storage.${status.credential_storage}`)}
+          </p>
+        )}
         {status?.model && (
           <p className="text-sm">
             {t("gemini.verified", { model: status.model })}
