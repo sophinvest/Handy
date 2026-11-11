@@ -35,6 +35,7 @@ The following is the concrete integration surface, rather than a claim that this
 - [`src-tauri/tauri.conf.json`](../src-tauri/tauri.conf.json)
 - [`src/bindings.ts`](../src/bindings.ts)
 - [`src/components/onboarding/OnboardingFlow.tsx`](../src/components/onboarding/OnboardingFlow.tsx)
+- [`src/components/onboarding/OnboardingShell.tsx`](../src/components/onboarding/OnboardingShell.tsx)
 - [`src/components/onboarding/StandaloneScreens.tsx`](../src/components/onboarding/StandaloneScreens.tsx)
 - [`src/components/onboarding/screens/Model.tsx`](../src/components/onboarding/screens/Model.tsx)
 - [`src/components/settings/general/GeneralSettings.tsx`](../src/components/settings/general/GeneralSettings.tsx)
@@ -89,3 +90,5 @@ Version 0.10.0-gemini.3 adds `crates/gemini-transcription/src/live.rs` (WebSocke
 On an upstream merge, check that `CaptureSink` still calls the cloud callback with every valid sample and that its callback is non-blocking. Verify cloud cancellation closes the channel, finish drains all delivered samples, and only recording completion consumes a cloud session. Preserve the private recovery offset/prefix and the rate limiter across retries. Keep unary upload size bounds independent from the maximum saved-recording duration. Never silently commit a speculative interim transcript.
 
 Native review for the live Ubuntu release transfers one exclusive request guard from session creation to its worker and back to finalization. Cancelling does not unlock a still-running request, and a failed recording start returns its borrowed detector. Cloud samples are never padded after capture; final sample-count validation compares the original recording exactly. Live rollover failures replay the complete buffered recording through pause pieces, preserving unary progress for recovery. The cloud Live overlay remains selected through finalization and respects the disabled-overlay setting. These changes stay within the existing integration files above.
+
+The expanded cloud setup scrolls inside the model onboarding screen above its fixed footer, in both recommended-model and all-model views. Other onboarding screens keep their existing layout. The shared description reflects Live transport and worker pause detection across General, Models and onboarding in all locale fallback strings.

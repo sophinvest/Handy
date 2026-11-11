@@ -1003,7 +1003,7 @@
   },
   "gemini": {
     "title": "Google Gemini (cloud)",
-    "description": "Records the whole clip, then sends it to Google when you release the key. Local speech models and voice detection stay unloaded. Clips over five minutes are saved for recovery instead of uploaded.",
+    "description": "Live mode sends audio to Google while you speak and previews the text. Pause pieces are used when Live is unavailable. Local speech models stay unloaded; a separate worker detects pauses. Failed or deferred audio stays saved for recovery.",
     "privacy": "Use a key from a Google project with no billing account for free-only service. Google may use free-tier audio to improve its products. Failed recordings stay on this computer until you retry or delete them.",
     "key": "Gemini API key",
     "save": "Verify model and save key",
@@ -1011,7 +1011,7 @@
     "choose": "Choose Google Gemini",
     "selected": "Google Gemini selected",
     "fallback": "Allow local fallback when Google fails (uses CPU)",
-    "fallbackHint": "Off by default. When off, quota, offline, and timeout failures save the clip for a manual retry. No automatic network retries.",
+    "fallbackHint": "Local speech fallback is off by default. Unrecovered or quota-deferred audio stays saved for manual retry. Live mode may switch to pause-piece uploads.",
     "localModel": "Local fallback model",
     "pending": "Saved clips: {{count}}",
     "pending_one": "Saved clips: {{count}}",
@@ -1029,7 +1029,7 @@
       "file": "Key storage: private file (0600) in Handy’s gemini-credentials folder. Secret Service was unavailable when saving."
     },
     "liveModel": "Live model: {{model}}",
-    "liveUnavailable": "unavailable for this key; use pause pieces",
+    "liveUnavailable": "not verified or unavailable; use pause pieces",
     "mode": "Cloud dictation mode",
     "modeAuto": "Live preview, then pause pieces if unavailable",
     "modeChunks": "Pause pieces",

@@ -544,6 +544,8 @@ export const Model: React.FC<ModelProps> = ({
         <ScreenMain
           ref={rootRef}
           data-model-root=""
+          layout="top"
+          scrollable
           align="stretch"
           header={<ScreenHeader title={title} sub={sub} />}
         >
@@ -622,6 +624,7 @@ export const Model: React.FC<ModelProps> = ({
         ref={rootRef}
         data-model-root=""
         layout="top"
+        scrollable
         align="stretch"
         header={<ScreenHeader title={title} sub={sub} />}
       >

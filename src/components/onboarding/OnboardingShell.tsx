@@ -111,6 +111,8 @@ export const ScreenMain = React.forwardRef<
     header?: React.ReactNode;
     /** "center" centres everything; "top" pins the header and content fills. */
     layout?: keyof typeof GAP;
+    /** Long setup forms scroll inside the shell, above its fixed footer. */
+    scrollable?: boolean;
   }
 >(
   (
@@ -119,6 +121,7 @@ export const ScreenMain = React.forwardRef<
       align = "center",
       header,
       layout = "center",
+      scrollable = false,
       className = "",
       ...rest
     },
@@ -127,12 +130,12 @@ export const ScreenMain = React.forwardRef<
     <div
       ref={ref}
       {...rest}
-      className={`flex h-full min-h-0 min-w-0 flex-col ${layout === "center" ? "justify-center-safe" : ""} text-center px-gutter ${className}`}
+      className={`flex h-full min-h-0 min-w-0 flex-col ${layout === "center" ? "justify-center-safe" : ""} ${scrollable ? "overflow-y-auto" : ""} text-center px-gutter ${className}`}
     >
       {header}
       {header && <div aria-hidden="true" className={GAP[layout]} />}
       <div
-        className={`flex min-h-0 w-full flex-col ${layout === "top" ? "flex-1" : ""} ${ALIGN[align]}`}
+        className={`flex min-h-0 w-full flex-col ${scrollable ? "flex-none pb-4" : layout === "top" ? "flex-1" : ""} ${ALIGN[align]}`}
       >
         {children}
       </div>

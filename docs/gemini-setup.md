@@ -36,7 +36,7 @@ To identify your session, run `echo $XDG_SESSION_TYPE` in a terminal. It prints 
 
 ## If Google fails
 
-Quota errors show **Gemini free limit reached**. Offline and timeout errors are reported too. Unary uploads have a 10-second network timeout. After an unrecoverable failure Handy keeps the clip in Handy's `gemini-pending` folder for recovery. There are no automatic network retries. Each unary upload is bounded to five minutes; saved recordings can be longer.
+Quota errors show **Gemini free limit reached**. Offline and timeout errors are reported too. Unary uploads have a 10-second network timeout. After an unrecoverable failure Handy keeps the clip in Handy's `gemini-pending` folder for recovery. Live failures switch to pause pieces when the configured unary quota permits. Failed unary uploads are not retried automatically. Each unary upload is bounded to five minutes; saved recordings can be longer.
 
 - Click the destination text box and press **Ctrl+Shift+F8** to retry the oldest saved clip once and paste it. Change the shortcut in Google settings if it conflicts with another app.
 - To review before pasting, use **Retry oldest clip for preview**, then **Copy transcript**. A preview leaves the WAV saved.
