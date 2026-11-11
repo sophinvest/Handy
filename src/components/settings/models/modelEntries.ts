@@ -51,7 +51,11 @@ export const useModelEntries = () => {
     () =>
       infos
         // Old .bin downloads only while they're still on disk.
-        .filter((info) => !isLegacyModel(info) || info.is_downloaded)
+        .filter(
+          (info) =>
+            info.id !== "google-gemini-cloud" &&
+            (!isLegacyModel(info) || info.is_downloaded),
+        )
         .map((info) => toTableModel(info, t)),
     [infos, t],
   );

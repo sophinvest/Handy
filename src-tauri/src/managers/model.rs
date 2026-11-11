@@ -1110,6 +1110,7 @@ impl ModelManager {
                 .then(b.speed_score.total_cmp(&a.speed_score))
                 .then_with(|| a.name.cmp(&b.name))
         });
+        list.push(crate::gemini::model_info());
         list
     }
 
@@ -1198,6 +1199,9 @@ impl ModelManager {
     }
 
     pub fn get_model_info(&self, model_id: &str) -> Option<ModelInfo> {
+        if model_id == crate::gemini::MODEL_ID {
+            return Some(crate::gemini::model_info());
+        }
         let models = self.available_models.lock().unwrap();
         models.get(model_id).cloned()
     }
@@ -1394,6 +1398,9 @@ impl ModelManager {
     }
 
     fn selected_model_is_available(models: &HashMap<String, ModelInfo>, model_id: &str) -> bool {
+        if model_id == crate::gemini::MODEL_ID {
+            return true;
+        }
         models
             .get(model_id)
             .is_some_and(|model| model.is_downloaded)
@@ -1487,7 +1494,7 @@ impl ModelManager {
             if let Some(available_model) = self
                 .get_available_models()
                 .into_iter()
-                .find(|model| model.is_downloaded)
+                .find(|model| model.is_downloaded && model.id != crate::gemini::MODEL_ID)
             {
                 info!(
                     "Auto-selecting model: {} ({})",
@@ -2262,6 +2269,9 @@ impl ModelManager {
     }
 
     pub async fn download_model(&self, model_id: &str) -> Result<()> {
+        if model_id == crate::gemini::MODEL_ID {
+            anyhow::bail!("Google Gemini has no local model file");
+        }
         let model_info = {
             let models = self.available_models.lock().unwrap();
             models.get(model_id).cloned()
@@ -2369,6 +2379,9 @@ impl ModelManager {
     }
 
     pub fn delete_model(&self, model_id: &str) -> Result<()> {
+        if model_id == crate::gemini::MODEL_ID {
+            anyhow::bail!("Google Gemini has no local model file");
+        }
         debug!("ModelManager: delete_model called for: {}", model_id);
 
         let model_info = {
@@ -2508,6 +2521,9 @@ impl ModelManager {
     }
 
     pub fn get_model_path(&self, model_id: &str) -> Result<PathBuf> {
+        if model_id == crate::gemini::MODEL_ID {
+            anyhow::bail!("Google Gemini has no local model file");
+        }
         let model_info = self
             .get_model_info(model_id)
             .ok_or_else(|| anyhow::anyhow!("Model not found: {}", model_id))?;

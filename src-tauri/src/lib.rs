@@ -10,6 +10,7 @@ pub mod cli;
 mod clipboard;
 mod commands;
 pub mod engine_supervisor;
+mod gemini;
 mod helpers;
 mod input;
 mod language_detection;
@@ -772,6 +773,11 @@ pub fn run(cli_args: CliArgs) {
             commands::models::get_available_models,
             commands::models::get_model_info,
             commands::models::download_model,
+            gemini::gemini_status,
+            gemini::gemini_save_key,
+            gemini::gemini_set_fallback,
+            gemini::gemini_retry_clip,
+            gemini::gemini_open_clips,
             commands::models::download_language_detector,
             commands::models::is_language_detector_downloaded,
             commands::models::delete_model,

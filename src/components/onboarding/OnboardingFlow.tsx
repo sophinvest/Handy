@@ -212,6 +212,8 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
           models={models}
           onBack={store.returnTo ? () => go(store.returnTo!) : back}
           onChoose={chooseModel}
+          onCloudChosen={onComplete}
+          preview={preview}
         />
       );
     case "demo":

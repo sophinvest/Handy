@@ -1,3 +1,4 @@
+import { GeminiSettings } from "../../settings/GeminiSettings";
 import React, { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "../../ui/Button";
@@ -72,6 +73,8 @@ interface ModelProps {
   onBack?: () => void;
   /** The picked model (catalog id), once Download or Continue is pressed. */
   onChoose: (modelId: string) => void;
+  onCloudChosen?: () => void;
+  preview?: boolean;
 }
 
 /** Screen 3: pick one of three suggested models, or Show all for the table. */
@@ -80,6 +83,8 @@ export const Model: React.FC<ModelProps> = ({
   models,
   onBack,
   onChoose,
+  onCloudChosen,
+  preview = false,
 }) => {
   const { t, i18n } = useTranslation();
   const words = useDownloadWords();
@@ -542,6 +547,7 @@ export const Model: React.FC<ModelProps> = ({
           align="stretch"
           header={<ScreenHeader title={title} sub={sub} />}
         >
+          <GeminiSettings onActivated={onCloudChosen} disabled={preview} />
           <div
             role="radiogroup"
             aria-label={t("onboarding.model.label")}
@@ -619,6 +625,7 @@ export const Model: React.FC<ModelProps> = ({
         align="stretch"
         header={<ScreenHeader title={title} sub={sub} />}
       >
+        <GeminiSettings onActivated={onCloudChosen} disabled={preview} />
         <ModelTable
           grading={grading}
           filters={filters}

@@ -1,4 +1,5 @@
 import React from "react";
+import { GeminiSettings } from "../GeminiSettings";
 import { useTranslation } from "react-i18next";
 import { type } from "@tauri-apps/plugin-os";
 import { MicrophoneSelector } from "../MicrophoneSelector";
@@ -38,6 +39,7 @@ export const GeneralSettings: React.FC = () => {
           <ChineseScriptSetting descriptionMode="tooltip" grouped={true} />
         )}
       </SettingsGroup>
+      <GeminiSettings />
       <ModelSettingsCard />
       <SettingsGroup title={t("settings.sound.title")}>
         <MicrophoneSelector descriptionMode="tooltip" grouped={true} />

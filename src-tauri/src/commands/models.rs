@@ -153,6 +153,13 @@ pub fn switch_active_model(app: &AppHandle, model_id: &str) -> Result<(), String
     let transcription_manager = app.state::<Arc<TranscriptionManager>>();
     transcription_manager.ensure_model_unlocked()?;
 
+    if app
+        .state::<Arc<crate::managers::audio::AudioRecordingManager>>()
+        .is_recording()
+        || crate::gemini::busy()
+    {
+        return Err("Finish the recording or cloud request before changing models".into());
+    }
     // Atomically claim the loading slot — prevents concurrent model loads
     // from tray double-clicks or overlapping commands. The guard resets the
     // flag on drop (including early returns, errors, and panics).
@@ -176,8 +183,32 @@ pub fn switch_active_model(app: &AppHandle, model_id: &str) -> Result<(), String
     // Persist the new selection early so the frontend sees the correct model
     // when it reacts to events emitted by load_model.
     let mut settings = settings;
+    if model_id == crate::gemini::MODEL_ID && old_model != crate::gemini::MODEL_ID {
+        settings.gemini_fallback_model = old_model.clone();
+    }
     settings.selected_model = model_id.to_string();
 
+    if model_id == crate::gemini::MODEL_ID {
+        transcription_manager.cancel_stream();
+        transcription_manager
+            .unload_model()
+            .map_err(|_| "Cannot unload the local model")?;
+        write_settings(app, settings);
+        let rm = app.state::<Arc<crate::managers::audio::AudioRecordingManager>>();
+        rm.stop_microphone_stream();
+        rm.preload_vad()
+            .map_err(|_| "Cannot prepare cloud audio capture")?;
+        let _ = app.emit(
+            "model-state-changed",
+            ModelStateEvent {
+                event_type: "loading_completed".into(),
+                model_id: Some(model_id.into()),
+                model_name: Some(model_info.name),
+                error: None,
+            },
+        );
+        return Ok(());
+    }
     write_settings(app, settings);
 
     // Skip eager loading if unload is set to "Immediately" — the model

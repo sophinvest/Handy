@@ -707,6 +707,14 @@ impl AudioRecordingManager {
 
     pub fn preload_vad(&self) -> Result<(), anyhow::Error> {
         let mut vad = self.vad.lock().unwrap();
+        let cloud = get_settings(&self.app_handle).selected_model == crate::gemini::MODEL_ID;
+        if matches!(&*vad, VadSlot::Idle(v) if v.unfiltered != cloud) {
+            *vad = VadSlot::Unloaded;
+        }
+        if cloud && matches!(*vad, VadSlot::Unloaded) {
+            *vad = VadSlot::Idle(CaptureVad::cloud());
+            return Ok(());
+        }
         if matches!(*vad, VadSlot::Unloaded) {
             let settings = get_settings(&self.app_handle);
             *vad = VadSlot::Idle(create_capture_vad(settings.vad_backend, &self.app_handle)?);

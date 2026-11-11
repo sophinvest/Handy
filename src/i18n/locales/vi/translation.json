@@ -54,6 +54,10 @@
       "breeze-asr": {
         "name": "Breeze ASR",
         "description": "Tối ưu hóa cho tiếng Quan Thoại Đài Loan. Hỗ trợ chuyển đổi ngôn ngữ."
+      },
+      "google-gemini-cloud": {
+        "name": "Google Gemini (cloud)",
+        "description": "Audio sent to Google. No local speech model. Free tier requires a project without billing."
       }
     },
     "errors": {
@@ -348,6 +352,10 @@
           "transcribe_with_post_process": {
             "name": "Phím tắt xử lý sau",
             "description": "Tùy chọn: Phím tắt chuyên dụng luôn áp dụng xử lý sau bằng AI cho bản chuyển đổi của bạn."
+          },
+          "gemini_retry": {
+            "name": "Retry Saved Gemini Clip",
+            "description": "Retry the oldest saved cloud recording and paste it at the cursor."
           }
         },
         "errors": {
@@ -992,5 +1000,29 @@
     "learnMore": "Cách khắc phục",
     "recorderBlocked": "Hiện không thể ghi phím tắt — Secure Input của macOS đang chặn các sự kiện phím. Hãy xử lý cảnh báo Secure Input trước.",
     "dismiss": "Bỏ qua"
+  },
+  "gemini": {
+    "title": "Google Gemini (cloud)",
+    "description": "Records the whole clip, then sends it to Google when you release the key. Local speech models and voice detection stay unloaded. Clips over five minutes are saved for recovery instead of uploaded.",
+    "privacy": "Use a key from a Google project with no billing account for free-only service. Google may use free-tier audio to improve its products. Failed recordings stay on this computer until you retry or delete them.",
+    "key": "Gemini API key (saved in the OS keychain)",
+    "save": "Verify model and save key",
+    "verified": "Verified model: {{model}}",
+    "choose": "Choose Google Gemini",
+    "selected": "Google Gemini selected",
+    "fallback": "Allow local fallback when Google fails (uses CPU)",
+    "fallbackHint": "Off by default. When off, quota, offline, and timeout failures save the clip for a manual retry. No automatic network retries.",
+    "localModel": "Local fallback model",
+    "pending": "Saved clips: {{count}}",
+    "pending_one": "Saved clips: {{count}}",
+    "pending_other": "Saved clips: {{count}}",
+    "retry": "Retry oldest clip for preview",
+    "openClips": "Open saved clips",
+    "transcript": "Recovered transcript",
+    "copy": "Copy transcript",
+    "copied": "Transcript copied. You can paste it into another app. The saved recording remains available.",
+    "working": "Working…",
+    "settingsError": "Could not read Gemini settings.",
+    "switchError": "Could not switch to Google Gemini."
   }
 }

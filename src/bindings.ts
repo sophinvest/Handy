@@ -1131,7 +1131,7 @@ hold_threshold_ms?: number; audio_feedback?: boolean; audio_feedback_volume?: nu
  * upgrading from before this key existed are blanked by the migration so they
  * see the current release's notes — see `apply_settings_migrations`.
  */
-whats_new_last_seen_version?: string; selected_model?: string; onboarding_completed?: boolean; always_on_microphone?: boolean; selected_microphone?: string | null; 
+whats_new_last_seen_version?: string; selected_model?: string; gemini_model?: string | null; gemini_fallback?: boolean; gemini_fallback_model?: string; onboarding_completed?: boolean; always_on_microphone?: boolean; selected_microphone?: string | null;
 /**
  * Which input channel to use on the selected microphone device.
  * None means "average all channels" (original behavior).

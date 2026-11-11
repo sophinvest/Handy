@@ -530,6 +530,10 @@ impl TranscriptionManager {
         model_id: &str,
         device_index: Option<usize>,
     ) -> Result<()> {
+        if model_id == crate::gemini::MODEL_ID {
+            self.cancel_stream();
+            return self.unload_model();
+        }
         let load_start = std::time::Instant::now();
         debug!("Starting to load model: {}", model_id);
 
@@ -696,6 +700,9 @@ impl TranscriptionManager {
     /// loading, and returns whether it did. Only a dictation sets
     /// `raise_notice`: file jobs and Settings report their own failures.
     pub fn initiate_model_load(&self, raise_notice: bool) -> bool {
+        if get_settings(&self.app_handle).selected_model == crate::gemini::MODEL_ID {
+            return false;
+        }
         let mut is_loading = self.is_loading.lock().unwrap();
         if *is_loading {
             return false;
@@ -997,6 +1004,54 @@ impl TranscriptionManager {
         audio: Vec<f32>,
         live: Option<RunOutcome>,
     ) -> Result<Transcription> {
+        let cloud_settings = get_settings(&self.app_handle);
+        if cloud_settings.selected_model == crate::gemini::MODEL_ID {
+            let (_request_guard, path, result) =
+                crate::gemini::transcribe(&self.app_handle, &audio).map_err(anyhow::Error::msg)?;
+            match result {
+                Ok(text) => {
+                    return Ok(Transcription {
+                        text,
+                        language: None,
+                    })
+                }
+                Err(error) => {
+                    if !cloud_settings.gemini_fallback
+                        || cloud_settings.gemini_fallback_model.is_empty()
+                    {
+                        return Err(anyhow::anyhow!(error));
+                    }
+                    let fallback = &cloud_settings.gemini_fallback_model;
+                    if fallback == crate::gemini::MODEL_ID {
+                        return Err(anyhow::anyhow!(error));
+                    }
+                    let local = self
+                        .load_model(fallback)
+                        .and_then(|_| self.decode_batch(audio))
+                        .map(|outcome| {
+                            let language = outcome
+                                .setup
+                                .spoken_language(outcome.model_detected_language.as_deref());
+                            Transcription {
+                                text: finish_text(outcome, &cloud_settings),
+                                language,
+                            }
+                        });
+                    // Opt-in fallback never leaves the local inference worker resident.
+                    let unload = self.unload_model();
+                    if unload.is_err() {
+                        return Err(anyhow::anyhow!(
+                            "Local fallback could not unload. Restart Handy. Clip saved."
+                        ));
+                    }
+                    if local.is_ok() {
+                        let _ = std::fs::remove_file(path);
+                    }
+                    return local
+                        .map_err(|_| anyhow::anyhow!("{error} Local fallback also failed."));
+                }
+            }
+        }
         #[cfg(debug_assertions)]
         if std::env::var("HANDY_FORCE_TRANSCRIPTION_FAILURE").is_ok() {
             return Err(anyhow::anyhow!(

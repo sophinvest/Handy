@@ -526,18 +526,21 @@ impl ShortcutAction for TranscribeAction {
         let kickoff_started = Instant::now();
         // An empty selection has nothing to load; the check below says so.
         let selected_model = get_settings(app).selected_model;
-        let load_started = !selected_model.is_empty() && tm.initiate_model_load(true);
+        let cloud = selected_model == crate::gemini::MODEL_ID;
+        let load_started = !cloud && !selected_model.is_empty() && tm.initiate_model_load(true);
         let rm_clone = Arc::clone(&rm);
-        std::thread::spawn(move || {
-            if let Err(e) = rm_clone.preload_vad() {
-                debug!("VAD pre-load failed: {}", e);
-            }
-        });
+        if !cloud {
+            std::thread::spawn(move || {
+                if let Err(e) = rm_clone.preload_vad() {
+                    debug!("VAD pre-load failed: {}", e);
+                }
+            });
+        }
         let kickoff_elapsed = kickoff_started.elapsed();
 
         // Don't open the mic if nothing can transcribe the recording. A load
         // started above reports its own failure; one already running doesn't.
-        if !tm.is_model_loaded() {
+        if !cloud && !tm.is_model_loaded() {
             if selected_model.is_empty() {
                 warn!("Not starting recording: no model is selected");
                 tm.raise_no_model_selected();
@@ -577,7 +580,9 @@ impl ShortcutAction for TranscribeAction {
             .as_ref()
             .map(|m| m.supports_streaming)
             .unwrap_or(false);
-        let vad_policy = if !settings.vad_enabled {
+        let vad_policy = if cloud {
+            VadPolicy::Cloud
+        } else if !settings.vad_enabled {
             VadPolicy::Disabled
         } else if model_supports_streaming {
             VadPolicy::Streaming
@@ -591,7 +596,7 @@ impl ShortcutAction for TranscribeAction {
             streaming: model_supports_streaming,
             long_form: false,
         };
-        if live_decode(expected_model, settings.long_form_chunking) != LiveDecode::None {
+        if !cloud && live_decode(expected_model, settings.long_form_chunking) != LiveDecode::None {
             tm.start_stream();
         }
         let plan_elapsed = plan_started.elapsed();
@@ -787,7 +792,16 @@ impl ShortcutAction for TranscribeAction {
                     // otherwise a batch run of the samples. A cancel is surfaced
                     // as an error, so it never starts a batch run.
                     let transcription_time = Instant::now();
-                    let transcription_result = tm.transcribe_recording(samples);
+                    let tm_for_decode = Arc::clone(&tm);
+                    let transcription_result = tauri::async_runtime::spawn_blocking(move || {
+                        tm_for_decode.transcribe_recording(samples)
+                    })
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(anyhow::anyhow!(
+                            "Transcription worker stopped. Recording remains in History."
+                        ))
+                    });
 
                     // Await WAV save and verify
                     let wav_saved = match wav_handle.await {
@@ -1079,9 +1093,29 @@ impl ShortcutAction for TestAction {
     }
 }
 
+struct GeminiRetryAction;
+impl ShortcutAction for GeminiRetryAction {
+    fn start(&self, app: &AppHandle, _binding_id: &str, _shortcut_str: &str) {
+        let app = app.clone();
+        std::thread::spawn(move || match crate::gemini::retry(&app, true) {
+            Ok(_) => notices::clear(&app, NoticeSource::Dictation),
+            Err(detail) => notices::raise(
+                &app,
+                Notice::new(NoticeCode::TranscriptionFailed, NoticeSource::Dictation)
+                    .with_detail(detail),
+            ),
+        });
+    }
+    fn stop(&self, _app: &AppHandle, _binding_id: &str, _shortcut_str: &str) {}
+}
+
 // Static Action Map
 pub static ACTION_MAP: Lazy<HashMap<String, Arc<dyn ShortcutAction>>> = Lazy::new(|| {
     let mut map = HashMap::new();
+    map.insert(
+        "gemini_retry".into(),
+        Arc::new(GeminiRetryAction) as Arc<dyn ShortcutAction>,
+    );
     map.insert(
         "transcribe".to_string(),
         Arc::new(TranscribeAction {

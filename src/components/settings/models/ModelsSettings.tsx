@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { GeminiSettings } from "../GeminiSettings";
 import { useTranslation } from "react-i18next";
 import { RefreshCw } from "lucide-react";
 import { Tooltip } from "@/components/ui/Tooltip";
@@ -154,6 +155,7 @@ export const ModelsSettings: React.FC<ModelsSettingsProps> = ({
       <div className="mx-[12px] mb-[16px] flex-none empty:hidden">
         <RetiredModelsNotice />
       </div>
+      <GeminiSettings />
       <ModelTable
         grading={facts}
         filters={filters}

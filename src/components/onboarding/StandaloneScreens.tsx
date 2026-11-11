@@ -61,6 +61,7 @@ export const ReplaceModel: React.FC<{
   return (
     <Model
       models={models}
+      onCloudChosen={onComplete}
       onBack={onBack}
       onChoose={(id) => {
         if (!downloadPick(models, id, store.downloadId)) return;

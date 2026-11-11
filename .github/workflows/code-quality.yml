@@ -35,6 +35,7 @@ concurrency:
 
 jobs:
   code-quality:
+    if: github.repository == 'cjpais/Handy'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5

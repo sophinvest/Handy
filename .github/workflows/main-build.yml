@@ -1,18 +1,32 @@
-name: "Main Branch Build"
-
-# Runs the full cross-platform build on every push to main so breakage is
-# caught before a manual release is triggered. Artifacts are kept for 30 days
-# so any commit on main has a downloadable, testable build.
-
+name: "Handy Gemini installers"
 on:
   push:
     branches: [main]
-
+  workflow_dispatch:
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: gemini-installers-${{ github.ref }}
   cancel-in-progress: true
-
 jobs:
+  quality:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+      - run: bun run lint
+      - run: cargo test --manifest-path crates/gemini-transcription/Cargo.toml
+      - run: |
+          mkdir -p src-tauri/resources/models
+          curl --fail -L -o src-tauri/resources/models/silero-vad-v6.2-F32.gguf https://huggingface.co/handy-computer/silero-vad-v6.2-gguf/resolve/main/silero-vad-v6.2-F32.gguf
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
   build:
     permissions:
       contents: write
@@ -20,33 +34,42 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: "macos-26"
-            args: "--target aarch64-apple-darwin"
-            target: "aarch64-apple-darwin"
-          - platform: "macos-latest"
-            args: "--target x86_64-apple-darwin"
-            target: "x86_64-apple-darwin"
-          - platform: "ubuntu-22.04"
-            args: "--bundles deb"
-            target: "x86_64-unknown-linux-gnu"
-          - platform: "ubuntu-24.04"
-            args: "--bundles appimage,rpm"
-            target: "x86_64-unknown-linux-gnu"
-          - platform: "ubuntu-24.04-arm"
-            args: "--bundles appimage,deb,rpm"
-            target: "aarch64-unknown-linux-gnu"
-          - platform: "windows-latest"
-            args: ""
-            target: "x86_64-pc-windows-msvc"
-          - platform: "windows-11-arm"
-            args: "--target aarch64-pc-windows-msvc"
-            target: "aarch64-pc-windows-msvc"
-
+          - platform: macos-26
+            args: --target aarch64-apple-darwin --bundles dmg
+            target: aarch64-apple-darwin
+          - platform: macos-latest
+            args: --target x86_64-apple-darwin --bundles dmg
+            target: x86_64-apple-darwin
+          - platform: windows-latest
+            args: --bundles nsis,msi
+            target: x86_64-pc-windows-msvc
     uses: ./.github/workflows/build.yml
     with:
       platform: ${{ matrix.platform }}
       target: ${{ matrix.target }}
       build-args: ${{ matrix.args }}
       upload-artifacts: true
-      sign-binaries: true
-    secrets: inherit
+      sign-binaries: false
+
+  release:
+    needs: [quality, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: handy-*
+          path: release-files
+          merge-multiple: true
+      - name: Publish verified preview installers
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          shopt -s globstar nullglob
+          version=$(node -p 'require("./package.json").version')
+          gh release create "v$version" --target "$GITHUB_SHA" --prerelease \
+            --title "Handy Gemini $version" --notes-file docs/gemini-setup.md \
+            release-files/**/*.dmg release-files/**/*.exe release-files/**/*.msi

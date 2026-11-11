@@ -11,6 +11,8 @@ use crate::audio_toolkit::{
 /// How 16 kHz mono frames should be filtered for one recording session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VadPolicy {
+    /// Preserve all samples; no VAD or spectrum FFT for cloud dictation.
+    Cloud,
     /// Bypass VAD and forward every frame.
     Disabled,
     /// Current offline-tuned VAD profile.
@@ -25,6 +27,7 @@ pub enum VadPolicy {
 /// kept as two resident engines.
 pub struct CaptureVad {
     detector: Box<dyn VoiceActivityDetector>,
+    pub unfiltered: bool,
     offline_hangover_frames: usize,
     streaming_hangover_frames: usize,
 }
@@ -41,11 +44,26 @@ impl CaptureVad {
         );
         Self {
             detector,
+            unfiltered: false,
             offline_hangover_frames,
             streaming_hangover_frames,
         }
     }
 
+    pub fn cloud() -> Self {
+        struct Raw;
+        impl VoiceActivityDetector for Raw {
+            fn push_frame<'a>(&'a mut self, frame: &'a [f32]) -> anyhow::Result<VadFrame<'a>> {
+                Ok(VadFrame::Speech(frame))
+            }
+            fn frame_samples(&self) -> usize {
+                512
+            }
+        }
+        let mut vad = Self::new(Box::new(Raw), 0, 0);
+        vad.unfiltered = true;
+        vad
+    }
     /// Samples per detector frame; the recorder delivers chunks of this size.
     pub fn frame_samples(&self) -> usize {
         self.detector.frame_samples()
@@ -56,7 +74,9 @@ impl CaptureVad {
     fn hangover_for(&self, policy: VadPolicy) -> usize {
         match policy {
             VadPolicy::Streaming => self.streaming_hangover_frames,
-            VadPolicy::Offline | VadPolicy::Disabled => self.offline_hangover_frames,
+            VadPolicy::Offline | VadPolicy::Disabled | VadPolicy::Cloud => {
+                self.offline_hangover_frames
+            }
         }
     }
 }
@@ -108,7 +128,7 @@ impl CaptureSink {
         on_audio: AudioFrameCallback,
         ready: mpsc::Sender<()>,
     ) -> Self {
-        if policy != VadPolicy::Disabled {
+        if !matches!(policy, VadPolicy::Disabled | VadPolicy::Cloud) {
             let hangover = vad.hangover_for(policy);
             vad.detector.set_hangover_frames(hangover);
             vad.detector.reset();
@@ -126,7 +146,11 @@ impl CaptureSink {
             on_levels,
             on_audio,
             ready: Some(ready),
-            samples: Vec::new(),
+            samples: if policy == VadPolicy::Cloud {
+                Vec::with_capacity(16_000 * 60)
+            } else {
+                Vec::new()
+            },
             heard_sound: false,
         }
     }
@@ -180,6 +204,11 @@ impl Sink for CaptureSink {
 
         // Mono by construction: the recorder mixes down or picks one channel.
         let real = &chunk.samples[..chunk.valid_frames];
+        if self.policy == VadPolicy::Cloud {
+            // No inference, FFT, network or disk work on the delivery thread.
+            Self::emit(&mut self.samples, &self.on_audio, real);
+            return;
+        }
         if let Some(levels) = self.visualizer.feed(real) {
             (self.on_levels)(levels);
         }

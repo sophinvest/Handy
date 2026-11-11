@@ -49,6 +49,15 @@ impl TranscriptionManager {
             }));
         }
 
+        if crate::settings::get_settings(&self.app_handle).selected_model == crate::gemini::MODEL_ID
+        {
+            if !control.proceed() {
+                return Ok(None);
+            }
+            let result = self.complete(started, audio, None)?;
+            control.progress(total, total);
+            return Ok(Some(result));
+        }
         self.touch_activity();
         self.initiate_model_load(false);
         // Read once: the model can't change until the job ends.

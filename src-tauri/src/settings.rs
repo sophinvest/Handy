@@ -435,6 +435,12 @@ pub struct AppSettings {
     #[serde(default = "default_model")]
     pub selected_model: String,
     #[serde(default)]
+    pub gemini_model: Option<String>,
+    #[serde(default)]
+    pub gemini_fallback: bool,
+    #[serde(default)]
+    pub gemini_fallback_model: String,
+    #[serde(default)]
     pub onboarding_completed: bool,
     #[serde(default = "default_always_on_microphone")]
     pub always_on_microphone: bool,
@@ -989,6 +995,17 @@ pub fn get_default_settings() -> AppSettings {
         },
     );
     bindings.insert(
+        "gemini_retry".to_string(),
+        ShortcutBinding {
+            id: "gemini_retry".into(),
+            name: "Retry Saved Gemini Clip".into(),
+            description: "Retry the oldest saved cloud recording and paste it at the cursor."
+                .into(),
+            default_binding: "ctrl+shift+f8".into(),
+            current_binding: "ctrl+shift+f8".into(),
+        },
+    );
+    bindings.insert(
         "cancel".to_string(),
         ShortcutBinding {
             id: "cancel".to_string(),
@@ -1013,6 +1030,9 @@ pub fn get_default_settings() -> AppSettings {
         show_whats_new_on_update: default_show_whats_new_on_update(),
         whats_new_last_seen_version: default_whats_new_last_seen_version(),
         selected_model: "".to_string(),
+        gemini_model: None,
+        gemini_fallback: false,
+        gemini_fallback_model: String::new(),
         onboarding_completed: false,
         always_on_microphone: false,
         spoken_languages: Vec::new(),
@@ -1209,6 +1229,12 @@ fn apply_settings_migrations(
     settings_value: &serde_json::Value,
 ) -> bool {
     let mut updated = false;
+    if !settings.bindings.contains_key("gemini_retry") {
+        if let Some(binding) = get_default_settings().bindings.remove("gemini_retry") {
+            settings.bindings.insert("gemini_retry".into(), binding);
+            updated = true;
+        }
+    }
 
     // One-time onboarding migration: users with an explicit selected model have
     // already made it through model selection. Users who merely have compatible
@@ -1446,8 +1472,11 @@ fn self_update_possible() -> bool {
 pub fn update_checks_forced_disabled() -> bool {
     use std::sync::OnceLock;
     static IS_UPDATER_DISABLED: OnceLock<bool> = OnceLock::new();
-    *IS_UPDATER_DISABLED
-        .get_or_init(|| utils::env_flag_enabled("HANDY_DISABLE_UPDATER") || !self_update_possible())
+    *IS_UPDATER_DISABLED.get_or_init(|| {
+        cfg!(feature = "gemini-fork")
+            || utils::env_flag_enabled("HANDY_DISABLE_UPDATER")
+            || !self_update_possible()
+    })
 }
 
 /// Effective updater state: the user's stored preference, overridden to `false`

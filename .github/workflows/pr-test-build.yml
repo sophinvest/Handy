@@ -10,6 +10,7 @@ on:
 
 jobs:
   build-test:
+    if: github.repository == 'cjpais/Handy'
     permissions:
       contents: write
     strategy:
@@ -51,6 +52,7 @@ jobs:
     secrets: inherit
 
   comment-on-pr:
+    if: github.repository == 'cjpais/Handy'
     needs: build-test
     runs-on: ubuntu-latest
     permissions:

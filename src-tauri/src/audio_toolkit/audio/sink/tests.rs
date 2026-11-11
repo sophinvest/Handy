@@ -176,3 +176,30 @@ fn finish_returns_the_detector_for_the_next_recording() {
     assert_eq!(captured.vad.frame_samples(), FRAME);
     assert_eq!(captured.vad.hangover_for(VadPolicy::Streaming), 20);
 }
+
+#[test]
+fn cloud_sink_preserves_sixty_seconds_including_silence_and_final_partial_frame() {
+    let (tx, _rx) = mpsc::channel();
+    let mut sink = CaptureSink::new(
+        CaptureVad::cloud(),
+        VadPolicy::Cloud,
+        Arc::new(|_| panic!("Cloud capture must not run spectrum FFT")),
+        Arc::new(|_| {}),
+        tx,
+    );
+    let source: Vec<f32> = (0..960_003)
+        .map(|i| {
+            if i % 3 == 0 {
+                0.0
+            } else {
+                (i % 100) as f32 / 100.0
+            }
+        })
+        .collect();
+    for frame in source.chunks(512) {
+        let mut padded = [0.0; 512];
+        padded[..frame.len()].copy_from_slice(frame);
+        sink.process_chunk(chunk(&padded, frame.len()));
+    }
+    assert_eq!(sink.finish().samples, source);
+}
