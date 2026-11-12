@@ -483,6 +483,21 @@ fn worker(
         }
     }
 }
+fn validate_stream_config(
+    mode: &str,
+    chunk_seconds: u32,
+    rpm: Option<u32>,
+    rpd: Option<u32>,
+) -> Result<(), String> {
+    if !["auto", "chunks", "single"].contains(&mode)
+        || ![30, 60, 90].contains(&chunk_seconds)
+        || rpm == Some(0)
+        || rpd == Some(0)
+    {
+        return Err("Choose a mode, a 30/60/90-second target, and positive quota limits, or leave limits unknown".into());
+    }
+    Ok(())
+}
 #[tauri::command]
 #[specta::specta]
 pub fn gemini_configure_stream(
@@ -493,13 +508,7 @@ pub fn gemini_configure_stream(
     rpd: Option<u32>,
 ) -> Result<(), String> {
     let _guard = gemini::idle_guard()?;
-    if !["auto", "chunks", "single"].contains(&mode.as_str())
-        || ![30, 60, 90].contains(&chunk_seconds)
-        || rpm == Some(0)
-        || rpd == Some(0)
-    {
-        return Err("Choose a mode and positive quota limits, or leave limits unknown".into());
-    }
+    validate_stream_config(&mode, chunk_seconds, rpm, rpd)?;
     let mut s = get_settings(&app);
     s.gemini_mode = mode;
     s.gemini_chunk_seconds = chunk_seconds;
@@ -514,6 +523,21 @@ mod tests {
     use super::*;
     use crate::audio_toolkit::{CaptureSink, CaptureVad, VadPolicy};
     use handy_recorder::{AudioChunk, Sink};
+    #[test]
+    fn stream_config_accepts_only_supported_targets_and_positive_known_caps() {
+        for mode in ["auto", "chunks", "single"] {
+            for target in [30, 60, 90] {
+                assert!(validate_stream_config(mode, target, None, None).is_ok());
+                assert!(validate_stream_config(mode, target, Some(1), Some(1)).is_ok());
+            }
+        }
+        for target in [0, 29, 31, 45, 59, 61, 89, 91, u32::MAX] {
+            assert!(validate_stream_config("chunks", target, None, None).is_err());
+        }
+        assert!(validate_stream_config("invalid", 60, None, None).is_err());
+        assert!(validate_stream_config("auto", 60, Some(0), None).is_err());
+        assert!(validate_stream_config("auto", 60, None, Some(0)).is_err());
+    }
     #[test]
     fn session_drains_after_capture_disconnect_and_keeps_request_ownership() {
         let guard = gemini::request_guard().unwrap();

@@ -152,6 +152,20 @@ mod tests {
         }
     }
     #[test]
+    fn continuous_speech_past_upload_limit_is_retained_and_rejected_without_mutation() {
+        let original = vec![0.25; RATE * 300 + 3];
+        for target in [30, 60, 90] {
+            let mut cutter = Cutter::new(target);
+            let mut retained = Vec::new();
+            for frame in original.chunks(FRAME) {
+                retained.extend_from_slice(frame);
+                assert_eq!(cutter.push(frame, true), None);
+            }
+            assert_eq!(crate::encode_wav(&retained), Err(crate::Error::TooLong));
+            assert_eq!(retained, original);
+        }
+    }
+    #[test]
     fn capture_reserves_tail_capacity_but_release_can_use_it() {
         let mut l = Limiter::new(Some(2), Some(4));
         assert!(l.allow_with_headroom(0, 0, 1));

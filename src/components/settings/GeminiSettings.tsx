@@ -40,22 +40,26 @@ export const GeminiSettings: React.FC<{
   const [chunkSeconds, setChunkSeconds] = useState(60);
   const [rpm, setRpm] = useState("");
   const [rpd, setRpd] = useState("");
-  const refresh = async () => {
+  const refresh = async (syncForm = true) => {
     const next = await invoke<Status>("gemini_status");
     setStatus(next);
-    setLocalModel(next.fallback_model);
-    setMode(next.mode);
-    setChunkSeconds(next.chunk_seconds);
-    setRpm(next.rpm?.toString() ?? "");
-    setRpd(next.rpd?.toString() ?? "");
+    // Native select popups return focus to the window. Background status
+    // refreshes must not replace the user's unsaved selection or quota edits.
+    if (syncForm) {
+      setLocalModel(next.fallback_model);
+      setMode(next.mode);
+      setChunkSeconds(next.chunk_seconds);
+      setRpm(next.rpm?.toString() ?? "");
+      setRpd(next.rpd?.toString() ?? "");
+    }
   };
   useEffect(() => {
     if (disabled) return;
     const unlisten = listen("gemini-clips-changed", () => {
-      refresh().catch(() => setMessage(t("gemini.settingsError")));
+      refresh(false).catch(() => setMessage(t("gemini.settingsError")));
     });
     const refreshOnFocus = () => {
-      refresh().catch(() => setMessage(t("gemini.settingsError")));
+      refresh(false).catch(() => setMessage(t("gemini.settingsError")));
     };
     window.addEventListener("focus", refreshOnFocus);
     return () => {

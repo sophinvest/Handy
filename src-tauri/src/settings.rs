@@ -1539,6 +1539,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn legacy_gemini_settings_default_to_sixty_seconds_and_targets_round_trip() {
+        let mut stored = serde_json::to_value(get_default_settings()).unwrap();
+        stored
+            .as_object_mut()
+            .unwrap()
+            .remove("gemini_chunk_seconds");
+        stored["gemini_mode"] = serde_json::json!("chunks");
+        let migrated: AppSettings = serde_json::from_value(stored.clone()).unwrap();
+        assert_eq!(migrated.gemini_chunk_seconds, 60);
+        assert_eq!(migrated.gemini_mode, "chunks");
+        for target in [30, 60, 90] {
+            stored["gemini_chunk_seconds"] = serde_json::json!(target);
+            let settings: AppSettings = serde_json::from_value(stored.clone()).unwrap();
+            assert_eq!(settings.gemini_chunk_seconds, target);
+            assert_eq!(
+                serde_json::to_value(settings).unwrap()["gemini_chunk_seconds"],
+                target
+            );
+        }
+    }
+    #[test]
     fn stored_binding_returns_the_requested_binding() {
         let settings = get_default_settings();
 
