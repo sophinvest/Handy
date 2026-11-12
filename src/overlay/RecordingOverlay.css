@@ -258,6 +258,8 @@
 }
 .stext-cap .tentative {
   color: inherit;
+  text-decoration-line: underline;
+  text-underline-offset: 3px;
 }
 .stext-cap .sloading {
   color: var(--s-muted);
