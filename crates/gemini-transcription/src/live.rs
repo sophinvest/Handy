@@ -257,18 +257,13 @@ impl Live {
             self.samples
         );
         let until = started + FINAL_TIMEOUT;
-        let mut settled = Instant::now();
         let baseline = self.finals;
         let mut previous = self.finals;
         while Instant::now() < until {
             if let Err(e) = self.poll() {
                 // A server may close immediately after its authoritative final.
                 // There can be nothing more to drain once that socket closes.
-                if e == Error::Offline
-                    && self.finals > baseline
-                    && self.text.complete
-                    && self.text.tentative.is_empty()
-                {
+                if e == Error::Offline && self.finals > baseline && self.text.tentative.is_empty() {
                     log::info!(
                         "gemini_live finalized_on_close release_ms={}",
                         started.elapsed().as_millis()
@@ -279,33 +274,31 @@ impl Live {
             }
             if self.finals != previous {
                 previous = self.finals;
-                settled = Instant::now();
                 log::info!(
                     "gemini_live finalization_received complete={} tentative_chars={}",
                     self.text.complete,
                     self.text.tentative.len()
                 );
             }
-            // Transcriptions can arrive after turnComplete. Drain a short quiet
-            // interval too, rather than pasting a prefix from that earlier event.
-            if (self.text.complete || self.finals > baseline)
-                && self.text.tentative.is_empty()
-                && settled.elapsed() >= Duration::from_millis(150)
-            {
-                log::info!(
-                    "gemini_live finalized release_ms={} frames={} partials={} finals={}",
-                    started.elapsed().as_millis(),
-                    self.frames,
-                    self.partials,
-                    self.finals
-                );
-                return if self.text.committed.trim().is_empty() {
-                    Err(Error::Empty)
-                } else {
-                    Ok(self.text.committed.clone())
-                };
-            }
+            // Input transcripts have no guaranteed ordering with turnComplete.
+            // A quiet gap (even after one final) cannot prove the last packet
+            // arrived. Keep draining the existing bounded window unless the
+            // peer ends the socket after authoritative final text.
             std::thread::sleep(Duration::from_millis(1));
+        }
+        if (self.text.complete || self.finals > baseline) && self.text.tentative.is_empty() {
+            log::info!(
+                "gemini_live finalized_after_drain release_ms={} frames={} partials={} finals={}",
+                started.elapsed().as_millis(),
+                self.frames,
+                self.partials,
+                self.finals
+            );
+            return if self.text.committed.trim().is_empty() {
+                Err(Error::Empty)
+            } else {
+                Ok(self.text.committed.clone())
+            };
         }
         log::warn!(
             "gemini_live finalization_timeout release_ms={}; clip preserved, no whole-file upload",

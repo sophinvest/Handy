@@ -250,3 +250,39 @@ fn authoritative_final_is_not_discarded_when_server_closes_immediately() {
     assert_eq!(live.finish().unwrap(), "Complete sentence.");
     server.join().unwrap();
 }
+
+#[test]
+fn delayed_final_without_interim_after_completion_keeps_the_last_words() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let mut ws = accept(listener);
+        read(&mut ws);
+        send(
+            &mut ws,
+            json!({"serverContent":{"inputTranscription":{"text":"First sentence."}}}),
+        );
+        read(&mut ws);
+        assert_eq!(read(&mut ws)["realtimeInput"]["audioStreamEnd"], true);
+        send(&mut ws, json!({"serverContent":{"turnComplete":true}}));
+        for part in ["The last", "words."] {
+            thread::sleep(Duration::from_millis(300));
+            send(
+                &mut ws,
+                json!({"serverContent":{"inputTranscription":{"text":part}}}),
+            );
+        }
+        thread::sleep(Duration::from_millis(100));
+    });
+    let mut live = client(addr);
+    live.audio(&[0.25; 512]).unwrap();
+    let until = Instant::now() + Duration::from_secs(1);
+    while live.text.committed.is_empty() && Instant::now() < until {
+        live.poll().unwrap();
+    }
+    assert_eq!(live.text.committed, "First sentence.");
+    live.audio(&[0.25; 512]).unwrap();
+    let result = live.finish();
+    server.join().unwrap();
+    assert_eq!(result.unwrap(), "First sentence. The last words.");
+}

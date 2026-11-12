@@ -26,7 +26,7 @@ The key is stored through Linux Secret Service/GNOME Keyring. If unavailable, Ha
 - **Google: error** or Handy’s error notice: the recording is retained. No partial hypothesis is pasted as a completed transcript.
 - **Local model**: offline recognition was explicitly selected.
 
-Live sends the audio-stream-end marker on release, then waits up to 1.5 seconds for authoritative final text, with a short drain for independently ordered transcript messages. It does not switch to a whole-recording upload during a failed Live finalization. A timeout saves the clip for explicit retry instead of pasting an incomplete prefix. This bounded finalization targets a paste within about two seconds on a healthy connection; Google/network/hardware latency is not guaranteed.
+Live sends the audio-stream-end marker on release, then drains independently ordered transcript messages for up to 1.5 seconds. It returns earlier only when the socket ends after authoritative final text; a brief quiet interval or turn-complete marker cannot end the drain early. It does not switch to a whole-recording upload during a failed Live finalization. A timeout saves the clip for explicit retry instead of pasting an incomplete prefix. This bounded finalization targets a paste within about two seconds on a healthy connection; Google/network/hardware latency is not guaranteed.
 
 No local neural VAD runs in Google mode. A small RMS energy calculation identifies quiet frames for pause pieces and long-session rollover. It keeps **all** audio, including quiet speech; it only decides where a piece ends. Background noise can delay a boundary. Live reconnects near nine minutes at a quiet boundary; audio arriving during reconnect remains buffered.
 
@@ -38,7 +38,7 @@ Start Handy with `--debug`, or use Handy’s log viewer. Never send the key or d
 2. `gemini_live setup_complete model=...` and overlay **● Google live**
 3. `gemini_live audio_out frames=... samples=...` while still speaking
 4. `gemini_live partial_in count=... audio_frames=...` **before release**, followed by more outgoing frames
-5. On release, `gemini_live audio_end` then `gemini_live finalized release_ms=...`
+5. On release, `gemini_live audio_end` then `gemini_live finalized_after_drain release_ms=...` or `gemini_live finalized_on_close release_ms=...`
 
 If it switches to pieces, find `gemini_live fallback=pause_pieces reason=...`, optionally preceded by `server_error code=...` or `socket_closed code=...`. The reason excludes server-supplied text and credentials. This is the evidence missing from the .4 report. Share only those metadata lines to diagnose the actual failure.
 
@@ -56,6 +56,6 @@ On Ubuntu, use `echo $XDG_SESSION_TYPE` to identify X11/Wayland. Keep the origin
 
 ## Verification and maintenance
 
-The transport suite exercises a complete mock WebSocket handshake, provisional and authoritative responses, finalization with/without turnComplete, final-after-turnComplete ordering, timeout preservation, segment spacing and real-time 60/180-second streams with delayed connection and exact audio counts. It uses no Google key. Native packaging and process evidence are listed with the release; do not infer a physical paste result from a socket test.
+The transport suite exercises a complete mock WebSocket handshake, provisional and authoritative responses, finalization with/without turnComplete, final-after-turnComplete ordering (including several delayed finals with no interim packet), timeout preservation, segment spacing and real-time 60/180-second streams with delayed connection and exact audio counts. It uses no Google key. Native packaging and process evidence are listed with the release; do not infer a physical paste result from a socket test.
 
 [Google Live Transcribe protocol](https://ai.google.dev/gemini-api/docs/live-api/live-transcribe) · [WebSocket reference](https://ai.google.dev/api/live) · [Pricing](https://ai.google.dev/gemini-api/docs/pricing/#gemini-3.5-transcribe-live) · [Maintenance](gemini-maintenance.md)
