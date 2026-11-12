@@ -4,37 +4,37 @@ use std::collections::VecDeque;
 
 pub const RATE: usize = 16_000;
 pub const FRAME: usize = 512;
-#[derive(Default)]
+/// Only detected pauses are eligible boundaries. A target is a minimum, never
+/// a deadline: if speech continues we keep the audio instead of guessing a cut.
 pub struct Cutter {
     since: usize,
     quiet: usize,
-    quietest: Option<(f32, usize)>,
+    target: usize,
+}
+impl Default for Cutter {
+    fn default() -> Self {
+        Self::new(60)
+    }
 }
 impl Cutter {
-    /// Returns a relative cut offset. A cut is considered only after 20 seconds.
-    /// Prefer 0.4 s of Silero non-speech; after 45 s use the quietest frame since
-    /// 20 s. The caller retains the suffix: no overlap, dropped silence or gaps.
+    pub fn new(target_seconds: u32) -> Self {
+        Self {
+            since: 0,
+            quiet: 0,
+            target: target_seconds.clamp(30, 90) as usize * RATE,
+        }
+    }
+    /// Return the end of at least 0.4 seconds of detected non-speech, after
+    /// the configured target. Every sample, including silence, stays in order.
+    /// VAD can be wrong; we never add a second energy-based forced-cut guess.
     pub fn push(&mut self, frame: &[f32], speech: bool) -> Option<usize> {
         self.since += frame.len();
         self.quiet = if speech { 0 } else { self.quiet + frame.len() };
-        if self.since >= 20 * RATE {
-            let energy = frame.iter().map(|s| s * s).sum::<f32>() / frame.len().max(1) as f32;
-            if self.quietest.is_none_or(|(e, _)| energy < e) {
-                self.quietest = Some((energy, self.since));
-            }
-            let cut = if self.quiet >= RATE * 4 / 10 {
-                Some(self.since)
-            } else if self.since >= 45 * RATE {
-                self.quietest.map(|(_, offset)| offset)
-            } else {
-                None
-            };
-            if let Some(cut) = cut {
-                self.since -= cut;
-                self.quiet = 0;
-                self.quietest = None;
-                return Some(cut);
-            }
+        if self.since >= self.target && self.quiet >= RATE * 4 / 10 {
+            let cut = self.since;
+            self.since = 0;
+            self.quiet = 0;
+            return Some(cut);
         }
         None
     }
@@ -56,6 +56,11 @@ impl Limiter {
         }
     }
     pub fn allow(&mut self, now: u64, day_count: u32) -> bool {
+        self.allow_with_headroom(now, day_count, 0)
+    }
+    /// During capture keep one request available for the final tail or an
+    /// explicit retry. Finalization/manual recovery can use that capacity.
+    pub fn allow_with_headroom(&mut self, now: u64, day_count: u32, headroom: u32) -> bool {
         while self
             .sent
             .front()
@@ -63,9 +68,11 @@ impl Limiter {
         {
             self.sent.pop_front();
         }
-        self.minute
-            .is_some_and(|n| n > 0 && self.sent.len() < n as usize)
-            && self.daily.is_some_and(|n| n > day_count)
+        self.minute.is_some_and(|n| {
+            n > 0 && self.sent.len().saturating_add(headroom as usize) < n as usize
+        }) && self
+            .daily
+            .is_some_and(|n| n > day_count.saturating_add(headroom))
     }
     pub fn record(&mut self, now: u64) {
         self.sent.push_back(now);
@@ -105,16 +112,54 @@ mod tests {
         assert_eq!(output, input);
     }
     #[test]
-    fn no_pause_uses_quietest_point_after_minimum() {
-        let mut c = Cutter::default();
-        let mut cut = None;
-        for i in 0..(45 * RATE).div_ceil(FRAME) {
-            let quiet = i == 700;
-            cut = c
-                .push(&vec![if quiet { 0.01 } else { 1.0 }; FRAME], true)
-                .or(cut);
+    fn targets_wait_for_a_pause_and_never_cut_on_low_energy_speech() {
+        for target in [30, 60, 90] {
+            let mut c = Cutter::new(target);
+            let speech_frames = ((target + 15) as usize * RATE).div_ceil(FRAME);
+            for _ in 0..speech_frames {
+                assert_eq!(c.push(&[0.001; FRAME], true), None);
+            }
+            for _ in 0..12 {
+                // 0.384 seconds is too short.
+                assert_eq!(c.push(&[0.0; FRAME], false), None);
+            }
+            assert_eq!(
+                c.push(&[0.0; FRAME], false),
+                Some((speech_frames + 13) * FRAME)
+            );
         }
-        assert_eq!(cut, Some(701 * FRAME));
+    }
+    #[test]
+    fn brief_pauses_before_target_do_not_send_and_partition_preserves_repetitions() {
+        for target in [30, 60, 90] {
+            let mut c = Cutter::new(target);
+            let mut pending = Vec::new();
+            let mut output = Vec::new();
+            let mut original = Vec::new();
+            let frames = ((target as usize + 4) * RATE).div_ceil(FRAME);
+            for i in 0..frames {
+                // Identical audio motifs represent intentional repetition.
+                let frame = vec![if i % 20 < 13 { 0.0 } else { 0.5 }; FRAME];
+                original.extend_from_slice(&frame);
+                pending.extend_from_slice(&frame);
+                if let Some(n) = c.push(&frame, i % 20 >= 13) {
+                    assert!(n >= target as usize * RATE);
+                    output.extend(pending.drain(..n));
+                }
+            }
+            output.extend(pending);
+            assert_eq!(output, original);
+        }
+    }
+    #[test]
+    fn capture_reserves_tail_capacity_but_release_can_use_it() {
+        let mut l = Limiter::new(Some(2), Some(4));
+        assert!(l.allow_with_headroom(0, 0, 1));
+        l.record(0);
+        assert!(!l.allow_with_headroom(1, 1, 1));
+        assert!(l.allow(1, 1));
+        assert!(!l.allow_with_headroom(60_000, 3, 1));
+        assert!(l.allow(60_000, 3));
     }
     #[test]
     fn unknown_quota_never_guesses_and_window_expires() {

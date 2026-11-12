@@ -723,9 +723,9 @@ async downloadModel(modelId: string) : Promise<Result<null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async geminiConfigureStream(mode: string, rpm: number | null, rpd: number | null) : Promise<Result<null, string>> {
+async geminiConfigureStream(mode: string, chunkSeconds: number, rpm: number | null, rpd: number | null) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("gemini_configure_stream", { mode, rpm, rpd }) };
+    return { status: "ok", data: await TAURI_INVOKE("gemini_configure_stream", { mode, chunkSeconds, rpm, rpd }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1177,7 +1177,7 @@ hold_threshold_ms?: number; audio_feedback?: boolean; audio_feedback_volume?: nu
  * upgrading from before this key existed are blanked by the migration so they
  * see the current release's notes — see `apply_settings_migrations`.
  */
-whats_new_last_seen_version?: string; selected_model?: string; gemini_model?: string | null; gemini_live_model?: string | null; gemini_mode?: string; gemini_rpm?: number | null; gemini_rpd?: number | null; gemini_fallback?: boolean; gemini_fallback_model?: string; onboarding_completed?: boolean; always_on_microphone?: boolean; selected_microphone?: string | null;
+whats_new_last_seen_version?: string; selected_model?: string; gemini_model?: string | null; gemini_live_model?: string | null; gemini_mode?: string; gemini_chunk_seconds?: number; gemini_rpm?: number | null; gemini_rpd?: number | null; gemini_fallback?: boolean; gemini_fallback_model?: string; onboarding_completed?: boolean; always_on_microphone?: boolean; selected_microphone?: string | null;
 /**
  * Which input channel to use on the selected microphone device.
  * None means "average all channels" (original behavior).
@@ -1532,7 +1532,7 @@ export type ShortcutActivation =
 "hold_or_toggle"
 export type ShortcutBinding = { id: string; name: string; description: string; default_binding: string; current_binding: string }
 export type SoundTheme = "marimba" | "pop" | "custom"
-export type Status = { configured: boolean; credential_storage: string; model: string | null; live_model: string | null; mode: string; rpm: number | null; rpd: number | null; requests_today: number; fallback: boolean; fallback_model: string; pending: number }
+export type Status = { configured: boolean; credential_storage: string; model: string | null; live_model: string | null; mode: string; chunk_seconds: number; rpm: number | null; rpd: number | null; requests_today: number; fallback: boolean; fallback_model: string; pending: number }
 /**
  * Phase of the streaming overlay card, emitted to drive its UI state.
  */

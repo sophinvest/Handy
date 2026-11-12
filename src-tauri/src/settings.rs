@@ -440,6 +440,8 @@ pub struct AppSettings {
     pub gemini_live_model: Option<String>,
     #[serde(default = "default_gemini_mode")]
     pub gemini_mode: String,
+    #[serde(default = "default_gemini_chunk_seconds")]
+    pub gemini_chunk_seconds: u32,
     #[serde(default)]
     pub gemini_rpm: Option<u32>,
     #[serde(default)]
@@ -1041,6 +1043,7 @@ pub fn get_default_settings() -> AppSettings {
         gemini_model: None,
         gemini_live_model: None,
         gemini_mode: default_gemini_mode(),
+        gemini_chunk_seconds: default_gemini_chunk_seconds(),
         gemini_rpm: None,
         gemini_rpd: None,
         gemini_fallback: false,
@@ -2190,4 +2193,8 @@ mod tests {
 
 fn default_gemini_mode() -> String {
     "auto".into()
+}
+
+fn default_gemini_chunk_seconds() -> u32 {
+    60
 }

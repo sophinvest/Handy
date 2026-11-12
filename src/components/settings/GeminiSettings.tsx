@@ -15,6 +15,7 @@ type Status = {
   model: string | null;
   live_model: string | null;
   mode: string;
+  chunk_seconds: number;
   rpm: number | null;
   rpd: number | null;
   requests_today: number;
@@ -36,6 +37,7 @@ export const GeminiSettings: React.FC<{
   const [preview, setPreview] = useState("");
   const [localModel, setLocalModel] = useState("");
   const [mode, setMode] = useState("auto");
+  const [chunkSeconds, setChunkSeconds] = useState(60);
   const [rpm, setRpm] = useState("");
   const [rpd, setRpd] = useState("");
   const refresh = async () => {
@@ -43,6 +45,7 @@ export const GeminiSettings: React.FC<{
     setStatus(next);
     setLocalModel(next.fallback_model);
     setMode(next.mode);
+    setChunkSeconds(next.chunk_seconds);
     setRpm(next.rpm?.toString() ?? "");
     setRpd(next.rpd?.toString() ?? "");
   };
@@ -160,6 +163,22 @@ export const GeminiSettings: React.FC<{
             <option value="single">{t("gemini.modeSingle")}</option>
           </select>
         </label>
+        <label className="block text-sm">
+          {t("gemini.chunkTarget")}
+          <select
+            className="block border border-line rounded p-2 w-full"
+            value={chunkSeconds}
+            disabled={locked}
+            onChange={(e) => setChunkSeconds(Number(e.target.value))}
+          >
+            {[30, 60, 90].map((seconds) => (
+              <option key={seconds} value={seconds}>
+                {t("gemini.chunkSeconds", { count: seconds })}
+              </option>
+            ))}
+          </select>
+        </label>
+        <p className="text-sm text-ink-2">{t("gemini.chunkHint")}</p>
         <p className="text-sm text-ink-2">{t("gemini.quotaHint")}</p>
         <label className="block text-sm">
           {t("gemini.rpm")}
@@ -190,6 +209,7 @@ export const GeminiSettings: React.FC<{
             run(async () => {
               await invoke("gemini_configure_stream", {
                 mode,
+                chunkSeconds,
                 rpm: rpm ? Number(rpm) : null,
                 rpd: rpd ? Number(rpd) : null,
               });

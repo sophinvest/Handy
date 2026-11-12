@@ -269,6 +269,7 @@ pub struct Status {
     model: Option<String>,
     live_model: Option<String>,
     mode: String,
+    chunk_seconds: u32,
     rpm: Option<u32>,
     rpd: Option<u32>,
     requests_today: u32,
@@ -287,6 +288,7 @@ pub async fn gemini_status(app: AppHandle) -> Result<Status, String> {
             model: s.gemini_model,
             live_model: s.gemini_live_model,
             mode: s.gemini_mode,
+            chunk_seconds: s.gemini_chunk_seconds,
             rpm: s.gemini_rpm,
             rpd: s.gemini_rpd,
             requests_today: crate::gemini_stream::usage(&app),
@@ -395,7 +397,7 @@ pub fn retry(app: &AppHandle, paste: bool) -> Result<String, String> {
             .map_err(|_| "Cannot locate pause detector")?;
         let mut vad = SileroVad::new(path, 0.3).map_err(|_| "Cannot load pause detector")?;
         let tail = &samples[progress.offset..];
-        let mut cutter = handy_gemini::pieces::Cutter::default();
+        let mut cutter = handy_gemini::pieces::Cutter::new(get_settings(app).gemini_chunk_seconds);
         let mut cut = tail.len();
         for frame in tail.chunks_exact(handy_gemini::pieces::FRAME) {
             if let Some(n) = cutter.push(

@@ -246,7 +246,7 @@ pub fn reserve(app: &AppHandle) -> Result<(), String> {
     limiter.record(now);
     Ok(())
 }
-fn can_send(app: &AppHandle) -> bool {
+fn can_send(app: &AppHandle, finalizing: bool) -> bool {
     let s = get_settings(app);
     let Ok(mut state) = QUOTA.lock() else {
         return false;
@@ -254,9 +254,10 @@ fn can_send(app: &AppHandle) -> bool {
     let limiter = state.get_or_insert_with(|| restored_limiter(app));
     limiter.minute = s.gemini_rpm;
     limiter.daily = s.gemini_rpd;
-    limiter.allow(
+    limiter.allow_with_headroom(
         chrono::Utc::now().timestamp_millis().max(0) as u64,
         usage(app),
+        if finalizing { 0 } else { 1 },
     )
 }
 fn worker(
@@ -298,7 +299,7 @@ fn worker(
     let mut sent = 0;
     let mut cut_base = 0;
     let mut boundary = 0;
-    let mut cutter = Cutter::default();
+    let mut cutter = Cutter::new(settings.gemini_chunk_seconds);
     let mut text = String::new();
     let mut prefix = String::new();
     let mut silence = 0;
@@ -329,7 +330,7 @@ fn worker(
                         sent = 0;
                         cut_base = 0;
                         boundary = 0;
-                        cutter = Cutter::default();
+                        cutter = Cutter::new(settings.gemini_chunk_seconds);
                         vad.reset();
                         preview(app, "", "");
                     }
@@ -386,7 +387,7 @@ fn worker(
                         sent = 0;
                         cut_base = 0;
                         boundary = 0;
-                        cutter = Cutter::default();
+                        cutter = Cutter::new(settings.gemini_chunk_seconds);
                         vad.reset();
                         preview(app, "", "");
                     }
@@ -402,7 +403,7 @@ fn worker(
                 sent = 0;
                 cut_base = 0;
                 boundary = 0;
-                cutter = Cutter::default();
+                cutter = Cutter::new(settings.gemini_chunk_seconds);
                 vad.reset();
                 preview(app, "", "");
                 continue;
@@ -431,7 +432,7 @@ fn worker(
                         sent = 0;
                         cut_base = 0;
                         boundary = 0;
-                        cutter = Cutter::default();
+                        cutter = Cutter::new(settings.gemini_chunk_seconds);
                         vad.reset();
                         preview(app, "", "");
                         continue;
@@ -442,7 +443,7 @@ fn worker(
             if finalizing {
                 boundary = audio.len();
             }
-            if boundary > sent && can_send(app) {
+            if boundary > sent && can_send(app, finalizing) {
                 let wav =
                     handy_gemini::encode_wav(&audio[sent..boundary]).map_err(|e| e.to_string())?;
                 reserve(app)?;
@@ -487,15 +488,21 @@ fn worker(
 pub fn gemini_configure_stream(
     app: AppHandle,
     mode: String,
+    chunk_seconds: u32,
     rpm: Option<u32>,
     rpd: Option<u32>,
 ) -> Result<(), String> {
     let _guard = gemini::idle_guard()?;
-    if !["auto", "chunks", "single"].contains(&mode.as_str()) || rpm == Some(0) || rpd == Some(0) {
+    if !["auto", "chunks", "single"].contains(&mode.as_str())
+        || ![30, 60, 90].contains(&chunk_seconds)
+        || rpm == Some(0)
+        || rpd == Some(0)
+    {
         return Err("Choose a mode and positive quota limits, or leave limits unknown".into());
     }
     let mut s = get_settings(&app);
     s.gemini_mode = mode;
+    s.gemini_chunk_seconds = chunk_seconds;
     s.gemini_rpm = rpm;
     s.gemini_rpd = rpd;
     write_settings(&app, s);
