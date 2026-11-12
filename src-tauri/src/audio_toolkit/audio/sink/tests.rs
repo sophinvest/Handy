@@ -10,10 +10,12 @@ struct ScriptedVad {
     frame_samples: usize,
     hangover: Arc<Mutex<Option<usize>>>,
     resets: Arc<Mutex<usize>>,
+    pushes: Arc<Mutex<usize>>,
 }
 
 impl VoiceActivityDetector for ScriptedVad {
     fn push_frame<'a>(&'a mut self, frame: &'a [f32]) -> anyhow::Result<VadFrame<'a>> {
+        *self.pushes.lock().unwrap() += 1;
         Ok(if frame[0] != 0.0 {
             VadFrame::Speech(frame)
         } else {
@@ -42,6 +44,7 @@ struct Harness {
     fed: Arc<Mutex<Vec<f32>>>,
     hangover: Arc<Mutex<Option<usize>>>,
     resets: Arc<Mutex<usize>>,
+    pushes: Arc<Mutex<usize>>,
 }
 
 fn harness(policy: VadPolicy) -> Harness {
@@ -51,6 +54,7 @@ fn harness(policy: VadPolicy) -> Harness {
     };
     let hangover = Arc::clone(&vad.hangover);
     let resets = Arc::clone(&vad.resets);
+    let pushes = Arc::clone(&vad.pushes);
     let fed = Arc::new(Mutex::new(Vec::new()));
     let on_audio: AudioFrameCallback = {
         let fed = Arc::clone(&fed);
@@ -71,6 +75,7 @@ fn harness(policy: VadPolicy) -> Harness {
         fed,
         hangover,
         resets,
+        pushes,
     }
 }
 
@@ -154,6 +159,11 @@ fn vad_keeps_speech_frames_only() {
     h.sink.process_chunk(chunk(&[2.0; FRAME], FRAME));
 
     let expected = [[1.0; FRAME], [2.0; FRAME]].concat();
+    assert_eq!(
+        *h.pushes.lock().unwrap(),
+        3,
+        "the detector counter observes local inference"
+    );
     assert_eq!(*h.fed.lock().unwrap(), expected);
     assert_eq!(h.sink.finish().samples, expected);
 }
@@ -202,4 +212,47 @@ fn cloud_sink_preserves_sixty_seconds_including_silence_and_final_partial_frame(
         sink.process_chunk(chunk(&padded, frame.len()));
     }
     assert_eq!(sink.finish().samples, source);
+}
+
+#[test]
+fn cloud_policy_bypasses_detector_and_preserves_three_minutes_on_both_outputs() {
+    // Use an instrumented detector rather than Raw: any accidental invocation
+    // becomes observable even if it would return plausible speech frames.
+    let mut h = harness(VadPolicy::Cloud);
+    let source: Vec<f32> = (0..2_880_003)
+        .map(|i| {
+            if i % 7 == 0 {
+                0.0
+            } else {
+                (i % 97) as f32 / 97.0
+            }
+        })
+        .collect();
+    for frame in source.chunks(FRAME) {
+        let mut padded = [0.0; FRAME];
+        padded[..frame.len()].copy_from_slice(frame);
+        h.sink.process_chunk(chunk(&padded, frame.len()));
+    }
+    assert_eq!(
+        *h.pushes.lock().unwrap(),
+        0,
+        "cloud must never run VAD inference"
+    );
+    assert_eq!(
+        *h.resets.lock().unwrap(),
+        0,
+        "cloud must not initialize detector state"
+    );
+    assert_eq!(*h.hangover.lock().unwrap(), None);
+    assert_eq!(
+        *h.fed.lock().unwrap(),
+        source,
+        "live callback must retain every real sample"
+    );
+    let captured = h.sink.finish();
+    assert_eq!(
+        captured.samples, source,
+        "recovery must retain the identical audio"
+    );
+    assert!(!captured.input_silent);
 }
