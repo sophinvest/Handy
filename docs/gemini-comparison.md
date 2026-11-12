@@ -1,6 +1,6 @@
 # Compare recognition on the same recording
 
-**Status: all Google and physical-laptop measurements below are unmeasured.** This worksheet is for Jean's Ubuntu laptop with his own no-billing key entered in Handy. Do not give the key to Sophinvest or put it in a shell command. The [.4 release](https://github.com/sophinvest/Handy/releases/tag/v0.10.0-gemini.4) includes the required controls and has passed native verification; use that installer, not the earlier .3 installer.
+**Status: all Google and physical-laptop measurements below are unmeasured.** This worksheet is for Jean's Ubuntu laptop with his own no-billing key entered in Handy. Do not give the key to Sophinvest or put it in a shell command. Use the [.5 release](https://github.com/sophinvest/Handy/releases/tag/v0.10.0-gemini.5), with visible engine status and corrected finalization. Earlier installers cannot show whether the preview is Live or pause pieces.
 
 ## Prepare once
 

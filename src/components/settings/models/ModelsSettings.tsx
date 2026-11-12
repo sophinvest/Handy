@@ -134,6 +134,11 @@ export const ModelsSettings: React.FC<ModelsSettingsProps> = ({
           label: t("modelTable.missingLanguage"),
           rows: lists.partial,
         },
+        {
+          key: "untested",
+          label: t("settings.models.sections.untested"),
+          rows: lists.untested,
+        },
       ];
 
   return (
@@ -155,7 +160,14 @@ export const ModelsSettings: React.FC<ModelsSettingsProps> = ({
       <div className="mx-[12px] mb-[16px] flex-none empty:hidden">
         <RetiredModelsNotice />
       </div>
-      <GeminiSettings />
+      <details className="mx-3 mb-4 shrink-0 rounded-lg border border-line">
+        <summary className="cursor-pointer px-4 py-3 text-sm">
+          {t("gemini.cloudSetup")}
+        </summary>
+        <div className="max-h-[35vh] overflow-y-auto">
+          <GeminiSettings />
+        </div>
+      </details>
       <ModelTable
         grading={facts}
         filters={filters}
@@ -166,16 +178,6 @@ export const ModelsSettings: React.FC<ModelsSettingsProps> = ({
         )}
         renderRow={(e) => <ModelRow key={e.id} entry={e} />}
         actionsHead={<Legend tier={facts.tier} />}
-        footer={
-          !searching &&
-          lists.untested.length > 0 && (
-            <Note>
-              {t("settings.models.untestedHidden", {
-                count: lists.untested.length,
-              })}
-            </Note>
-          )
-        }
         thinEdge
       />
     </div>

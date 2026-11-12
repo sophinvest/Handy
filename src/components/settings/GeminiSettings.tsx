@@ -29,13 +29,12 @@ export const GeminiSettings: React.FC<{
   disabled?: boolean;
 }> = ({ onActivated, disabled = false }) => {
   const { t } = useTranslation();
-  const { models, currentModel, selectModel } = useModelStore();
+  const { currentModel, selectModel } = useModelStore();
   const [status, setStatus] = useState<Status>();
   const [key, setKey] = useState("");
   const [working, setWorking] = useState(false);
   const [message, setMessage] = useState("");
   const [preview, setPreview] = useState("");
-  const [localModel, setLocalModel] = useState("");
   const [mode, setMode] = useState("auto");
   const [chunkSeconds, setChunkSeconds] = useState(60);
   const [rpm, setRpm] = useState("");
@@ -46,7 +45,6 @@ export const GeminiSettings: React.FC<{
     // Native select popups return focus to the window. Background status
     // refreshes must not replace the user's unsaved selection or quota edits.
     if (syncForm) {
-      setLocalModel(next.fallback_model);
       setMode(next.mode);
       setChunkSeconds(next.chunk_seconds);
       setRpm(next.rpm?.toString() ?? "");
@@ -82,9 +80,6 @@ export const GeminiSettings: React.FC<{
       setWorking(false);
     }
   };
-  const locals = models.filter(
-    (m) => m.id !== GEMINI_ENGINE && m.is_downloaded,
-  );
   const locked = working || disabled;
   return (
     <SettingsGroup title={t("gemini.title")}>
@@ -231,46 +226,7 @@ export const GeminiSettings: React.FC<{
           </p>
         ) : null}
         <p className="text-sm text-ink-2">{t("gemini.pasteRelease")}</p>
-        <label className="flex items-center gap-2 text-sm">
-          <input
-            type="checkbox"
-            checked={status?.fallback ?? false}
-            disabled={locked || !localModel}
-            onChange={(e) =>
-              run(async () => {
-                await invoke("gemini_set_fallback", {
-                  enabled: e.target.checked,
-                  model: localModel,
-                });
-              })
-            }
-          />
-          {t("gemini.fallback")}
-        </label>
-        <p className="text-sm text-ink-2">{t("gemini.fallbackHint")}</p>
-        <select
-          aria-label={t("gemini.localModel")}
-          className="border border-line rounded p-2 w-full"
-          value={localModel}
-          disabled={locked}
-          onChange={(e) => {
-            const model = e.target.value;
-            setLocalModel(model);
-            run(async () => {
-              await invoke("gemini_set_fallback", {
-                enabled: status?.fallback ?? false,
-                model,
-              });
-            });
-          }}
-        >
-          <option value="">{t("gemini.localModel")}</option>
-          {locals.map((m) => (
-            <option key={m.id} value={m.id}>
-              {m.name}
-            </option>
-          ))}
-        </select>
+        <p className="text-sm text-ink-2">{t("gemini.noLocalInference")}</p>
         <ShortcutInput shortcutId="gemini_retry" grouped />
         <p className="text-sm">
           {t("gemini.pending", { count: status?.pending ?? 0 })}

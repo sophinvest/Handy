@@ -10,6 +10,7 @@ use std::{
 use tungstenite::{client::IntoClientRequest, stream::MaybeTlsStream, Message, WebSocket};
 const HOST: &str = "generativelanguage.googleapis.com";
 const URL: &str = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
+const FINAL_TIMEOUT: Duration = Duration::from_millis(1500);
 pub fn valid_model(name: &str) -> bool {
     name.starts_with("models/gemini-")
         && name.contains("transcribe")
@@ -24,6 +25,19 @@ pub struct Text {
     pub tentative: String,
     pub complete: bool,
 }
+/// Join authoritative utterances/pieces, never speculative partial tokens.
+/// Preserve intentional repetitions and punctuation; only supply missing whitespace.
+pub fn append_segment(text: &mut String, part: &str) {
+    if !text.is_empty()
+        && !part.is_empty()
+        && !text.ends_with(char::is_whitespace)
+        && !part.starts_with(char::is_whitespace)
+        && !part.starts_with(|c: char| ",.;:!?)]}，。！？".contains(c))
+    {
+        text.push(' ');
+    }
+    text.push_str(part);
+}
 impl Text {
     pub fn accept(&mut self, body: &Value) {
         let c = &body["serverContent"];
@@ -31,7 +45,7 @@ impl Text {
             self.tentative = t.to_owned();
         }
         if let Some(t) = c["inputTranscription"]["text"].as_str() {
-            self.committed.push_str(t);
+            append_segment(&mut self.committed, t);
             self.tentative.clear();
         }
         if c["turnComplete"] == true {
@@ -44,6 +58,10 @@ pub struct Live {
     pub text: Text,
     pub since: Instant,
     pub go_away: bool,
+    frames: usize,
+    samples: usize,
+    partials: usize,
+    finals: usize,
 }
 impl Live {
     pub fn connect(key: &str, model: &str, words: &[String]) -> Result<Self, Error> {
@@ -66,11 +84,22 @@ impl Live {
             .insert("x-goog-api-key", key.parse().map_err(|_| Error::Auth)?);
         let (socket, _) = tungstenite::client_tls_with_config(request, tcp, None, None)
             .map_err(|_| Error::Unavailable)?;
+        Self::setup(socket, model, words)
+    }
+    fn setup(
+        socket: WebSocket<MaybeTlsStream<TcpStream>>,
+        model: &str,
+        words: &[String],
+    ) -> Result<Self, Error> {
         let mut this = Self {
             socket,
             text: Text::default(),
             since: Instant::now(),
             go_away: false,
+            frames: 0,
+            samples: 0,
+            partials: 0,
+            finals: 0,
         };
         this.send(json!({"setup":{"model":model,"generationConfig":{"responseModalities":["TEXT"]},
             "inputAudioTranscription":{"mode":"VERBATIM","customVocabulary":words.iter().take(1000).collect::<Vec<_>>()}}}))?;
@@ -79,17 +108,33 @@ impl Live {
             if Instant::now() >= until {
                 return Err(Error::Timeout);
             }
-            let body = this.receive()?.ok_or(Error::Unavailable)?;
+            let Some(body) = this.receive()? else {
+                continue;
+            };
             if body.get("setupComplete").is_some() {
                 break;
             }
         }
         match this.socket.get_mut() {
-            MaybeTlsStream::Plain(t) => t.set_read_timeout(Some(Duration::from_millis(2))),
-            MaybeTlsStream::Rustls(t) => t.sock.set_read_timeout(Some(Duration::from_millis(2))),
+            MaybeTlsStream::Plain(t) => {
+                t.set_write_timeout(Some(Duration::from_millis(300)))
+                    .map_err(|_| Error::Offline)?;
+                t.set_read_timeout(Some(Duration::from_millis(2)))
+            }
+            MaybeTlsStream::Rustls(t) => {
+                t.sock
+                    .set_write_timeout(Some(Duration::from_millis(300)))
+                    .map_err(|_| Error::Offline)?;
+                t.sock.set_read_timeout(Some(Duration::from_millis(2)))
+            }
             _ => return Err(Error::Unavailable),
         }
         .map_err(|_| Error::Offline)?;
+        log::info!(
+            "gemini_live setup_complete model={} connect_ms={}",
+            model,
+            this.since.elapsed().as_millis()
+        );
         Ok(this)
     }
     fn send(&mut self, value: Value) -> Result<(), Error> {
@@ -103,13 +148,28 @@ impl Live {
             .flat_map(|s| ((s.clamp(-1.0, 1.0) * 32767.0).round() as i16).to_le_bytes())
             .collect();
         self.text.complete = false;
-        self.send(json!({"realtimeInput":{"audio":{"mimeType":"audio/pcm;rate=16000","data":STANDARD.encode(pcm)}}}))
+        self.send(json!({"realtimeInput":{"audio":{"mimeType":"audio/pcm;rate=16000","data":STANDARD.encode(pcm)}}}))?;
+        self.frames += 1;
+        self.samples += samples.len();
+        if self.frames == 1 || self.frames.is_multiple_of(100) {
+            log::info!(
+                "gemini_live audio_out frames={} samples={} elapsed_ms={}",
+                self.frames,
+                self.samples,
+                self.since.elapsed().as_millis()
+            );
+        }
+        Ok(())
     }
     fn receive(&mut self) -> Result<Option<Value>, Error> {
         match self.socket.read() {
             Ok(Message::Binary(t)) => {
                 let v: Value = serde_json::from_slice(&t).map_err(|_| Error::Unavailable)?;
                 if v.get("error").is_some() {
+                    log::warn!(
+                        "gemini_live server_error code={}",
+                        v["error"]["code"].as_u64().unwrap_or(0)
+                    );
                     return Err(if v["error"]["code"] == 429 {
                         Error::Quota
                     } else {
@@ -117,12 +177,16 @@ impl Live {
                     });
                 }
                 self.go_away |= v.get("goAway").is_some();
-                self.text.accept(&v);
+                self.accept(&v);
                 Ok(Some(v))
             }
             Ok(Message::Text(t)) => {
                 let v: Value = serde_json::from_str(&t).map_err(|_| Error::Unavailable)?;
                 if v.get("error").is_some() {
+                    log::warn!(
+                        "gemini_live server_error code={}",
+                        v["error"]["code"].as_u64().unwrap_or(0)
+                    );
                     return Err(if v["error"]["code"] == 429 {
                         Error::Quota
                     } else {
@@ -130,10 +194,16 @@ impl Live {
                     });
                 }
                 self.go_away |= v.get("goAway").is_some();
-                self.text.accept(&v);
+                self.accept(&v);
                 Ok(Some(v))
             }
-            Ok(Message::Close(_)) => Err(Error::Offline),
+            Ok(Message::Close(frame)) => {
+                log::warn!(
+                    "gemini_live socket_closed code={}",
+                    frame.map(|f| u16::from(f.code)).unwrap_or(1005)
+                );
+                Err(Error::Offline)
+            }
             Ok(_) => Ok(None),
             Err(tungstenite::Error::Io(e))
                 if matches!(
@@ -145,6 +215,28 @@ impl Live {
             }
             Err(_) => Err(Error::Offline),
         }
+    }
+    fn accept(&mut self, v: &Value) {
+        let content = &v["serverContent"];
+        if content["interimInputTranscription"]["text"].is_string() {
+            self.partials += 1;
+            log::info!(
+                "gemini_live partial_in count={} audio_frames={} elapsed_ms={}",
+                self.partials,
+                self.frames,
+                self.since.elapsed().as_millis()
+            );
+        }
+        if content["inputTranscription"]["text"].is_string() {
+            self.finals += 1;
+            log::info!(
+                "gemini_live final_in count={} audio_frames={} elapsed_ms={}",
+                self.finals,
+                self.frames,
+                self.since.elapsed().as_millis()
+            );
+        }
+        self.text.accept(v);
     }
     pub fn poll(&mut self) -> Result<(), Error> {
         // Bounded even when the server floods events; audio remains buffered.
@@ -158,80 +250,69 @@ impl Live {
     pub fn finish(&mut self) -> Result<String, Error> {
         self.text.complete = false;
         self.send(json!({"realtimeInput":{"audioStreamEnd":true}}))?;
-        let until = Instant::now() + TIMEOUT;
+        let started = Instant::now();
+        log::info!(
+            "gemini_live audio_end frames={} samples={}",
+            self.frames,
+            self.samples
+        );
+        let until = started + FINAL_TIMEOUT;
+        let mut settled = Instant::now();
+        let baseline = self.finals;
+        let mut previous = self.finals;
         while Instant::now() < until {
-            self.poll()?;
-            if self.text.complete && self.text.tentative.is_empty() {
+            if let Err(e) = self.poll() {
+                // A server may close immediately after its authoritative final.
+                // There can be nothing more to drain once that socket closes.
+                if e == Error::Offline
+                    && self.finals > baseline
+                    && self.text.complete
+                    && self.text.tentative.is_empty()
+                {
+                    log::info!(
+                        "gemini_live finalized_on_close release_ms={}",
+                        started.elapsed().as_millis()
+                    );
+                    return Ok(self.text.committed.clone());
+                }
+                return Err(e);
+            }
+            if self.finals != previous {
+                previous = self.finals;
+                settled = Instant::now();
+                log::info!(
+                    "gemini_live finalization_received complete={} tentative_chars={}",
+                    self.text.complete,
+                    self.text.tentative.len()
+                );
+            }
+            // Transcriptions can arrive after turnComplete. Drain a short quiet
+            // interval too, rather than pasting a prefix from that earlier event.
+            if (self.text.complete || self.finals > baseline)
+                && self.text.tentative.is_empty()
+                && settled.elapsed() >= Duration::from_millis(150)
+            {
+                log::info!(
+                    "gemini_live finalized release_ms={} frames={} partials={} finals={}",
+                    started.elapsed().as_millis(),
+                    self.frames,
+                    self.partials,
+                    self.finals
+                );
                 return if self.text.committed.trim().is_empty() {
                     Err(Error::Empty)
                 } else {
                     Ok(self.text.committed.clone())
                 };
             }
+            std::thread::sleep(Duration::from_millis(1));
         }
+        log::warn!(
+            "gemini_live finalization_timeout release_ms={}; clip preserved, no whole-file upload",
+            started.elapsed().as_millis()
+        );
         Err(Error::Timeout)
     }
 }
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn interim_replaces_and_final_appends_without_pasting_partial() {
-        let mut t = Text::default();
-        t.accept(&json!({"serverContent":{"interimInputTranscription":{"text":"water"}}}));
-        t.accept(&json!({"serverContent":{"interimInputTranscription":{"text":"Whatagraph"}}}));
-        assert_eq!(t.tentative, "Whatagraph");
-        assert!(t.committed.is_empty());
-        t.accept(&json!({"serverContent":{"inputTranscription":{"text":"Whatagraph "}}}));
-        t.accept(&json!({"serverContent":{"inputTranscription":{"text":"Whatagraph"},"turnComplete":true}}));
-        assert_eq!(t.committed, "Whatagraph Whatagraph");
-        assert!(t.tentative.is_empty());
-        assert!(t.complete);
-    }
-    #[test]
-    fn socket_audio_preview_and_release_finish_use_one_ordered_stream() {
-        use std::net::TcpListener;
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = std::thread::spawn(move || {
-            let (tcp, _) = listener.accept().unwrap();
-            let mut ws = tungstenite::accept(tcp).unwrap();
-            let audio: Value = serde_json::from_str(ws.read().unwrap().to_text().unwrap()).unwrap();
-            assert_eq!(
-                audio["realtimeInput"]["audio"]["mimeType"],
-                "audio/pcm;rate=16000"
-            );
-            assert_eq!(
-                STANDARD
-                    .decode(audio["realtimeInput"]["audio"]["data"].as_str().unwrap())
-                    .unwrap()
-                    .len(),
-                6
-            );
-            ws.send(Message::Text(
-                json!({"serverContent":{"interimInputTranscription":{"text":"Jean"}}})
-                    .to_string()
-                    .into(),
-            ))
-            .unwrap();
-            let end: Value = serde_json::from_str(ws.read().unwrap().to_text().unwrap()).unwrap();
-            assert_eq!(end["realtimeInput"]["audioStreamEnd"], true);
-            ws.send(Message::Binary(json!({"serverContent":{"inputTranscription":{"text":"Jean Gottschalk"},"turnComplete":true}}).to_string().into_bytes().into())).unwrap();
-            std::thread::sleep(Duration::from_millis(20));
-        });
-        let tcp = TcpStream::connect(addr).unwrap();
-        tcp.set_read_timeout(Some(Duration::from_millis(2)))
-            .unwrap();
-        let (socket, _) =
-            tungstenite::client(format!("ws://{addr}"), MaybeTlsStream::Plain(tcp)).unwrap();
-        let mut live = Live {
-            socket,
-            text: Text::default(),
-            since: Instant::now(),
-            go_away: false,
-        };
-        live.audio(&[0.0, 0.25, -0.5]).unwrap();
-        assert_eq!(live.finish().unwrap(), "Jean Gottschalk");
-        server.join().unwrap();
-    }
-}
+mod tests;

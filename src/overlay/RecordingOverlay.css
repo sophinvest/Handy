@@ -457,3 +457,18 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* Engine identity remains visible before the first transcript arrives. */
+.sengine {
+  min-width: 0;
+  font: 500 11px var(--s-font);
+  color: var(--color-text);
+  white-space: nowrap;
+  text-align: center;
+}
+.sengine .swave {
+  display: none;
+}
+.sengine[data-engine="google_live"] {
+  color: var(--color-logo-primary);
+}

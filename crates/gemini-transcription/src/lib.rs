@@ -30,7 +30,7 @@ impl fmt::Display for Error {
         f.write_str(match self {
             Self::Quota => "Gemini free limit reached",
             Self::Offline => "Gemini offline or unavailable",
-            Self::Timeout => "Gemini timed out after 10 seconds",
+            Self::Timeout => "Gemini request timed out",
             Self::Auth => "Gemini key was rejected. Check the key in Settings",
             Self::Unavailable => "Gemini could not transcribe this clip",
             Self::InvalidAudio => "Recording contains invalid audio",

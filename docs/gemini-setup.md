@@ -1,76 +1,61 @@
 # Handy Gemini for Ubuntu
 
-This is a Sophinvest fork of Handy, not a loadable plugin. It replaces the existing Handy application, uses the same application identity and settings, and adds Google audio transcription. Handy has no plugin loader. Its original local models and paste implementation remain in place.
+This Sophinvest fork adds Google Gemini alongside Handy’s local models. It uses the same application identity and original Linux clipboard/paste implementation. The built-in updater is disabled so an official Handy update cannot silently remove Gemini. Sophinvest must merge upstream fixes and publish another fork release.
 
-**Updates:** the fork's built-in updater is disabled. Official Handy installers will replace the fork and remove the Gemini option. To keep both the cloud engine and future Handy fixes, Sophinvest must bring each official release into this fork and publish a new package. The [maintenance guide](gemini-maintenance.md) lists the changed files and the update procedure.
+## Install
 
-## Install on Ubuntu
+Quit Handy, download the `.deb` from [Sophinvest releases](https://github.com/sophinvest/Handy/releases), and install it with `sudo apt install ./Handy_0.10.0-gemini.5_amd64.deb`. Reopen Handy. Your settings and recordings remain in place. The unsigned package is published only in the Sophinvest repository. To roll back, quit and reinstall the official Handy package.
 
-1. Quit Handy from its tray menu.
-2. Download the `.deb` from the [Sophinvest Handy releases](https://github.com/sophinvest/Handy/releases).
-3. In a terminal in Downloads, install the exact downloaded filename, for example: `sudo apt install ./Handy_0.10.0-gemini.4_amd64.deb`. Use the actual release filename if it differs. Ubuntu installs the package over the existing Handy and resolves its dependencies. Do not delete your existing settings or recordings.
-4. Open **Handy** from the app launcher. If you used AppImage instead, download the new AppImage, mark it executable in Properties → Permissions, then run it in place of the old AppImage. The AppImage may need Ubuntu's `libfuse2` or `libfuse2t64` package depending on the Ubuntu version. It also uses the host Vulkan loader (`libvulkan1`), which can be installed with `sudo apt install libvulkan1` if absent. The `.deb` declares this dependency and installs it automatically. Keep the host Vulkan loader rather than bundling a different graphics stack into the AppImage.
-5. For rollback, quit Handy and reinstall the official Handy package from its official release page. Your normal local model settings remain available. The Gemini key and saved recovery clips are separate files; rollback does not require deleting them.
+## Choose Google or a local model
 
-The package is unsigned. Ubuntu may identify it as a locally downloaded package; install only the file from the Sophinvest release above.
+**Models** shows Handy’s local catalog, downloaded models and the expandable **Google Gemini (cloud) — choose or configure** row. Google setup no longer occupies the entire Models screen. Expand the row to configure Google; collapse it to browse local models. Selecting a local model restores ordinary offline dictation. General and onboarding use the same Google controls.
 
-## Create the free-only key
+1. Create your own key in [Google AI Studio](https://aistudio.google.com/apikey), using a dedicated project **without a linked billing account**. The app never changes billing; a key from a billed project is not made free-only by this app.
+2. Paste the key into Handy’s Google settings and click **Verify model and save key**. ListModels discovers the unary and Live Transcribe resource names available to the key. No key needs to be sent to Sophinvest.
+3. Click **Choose Google Gemini**. Local speech and language models unload. Google mode never runs a local recognition or neural pause-detection model, including if an old settings file still enables local fallback. For offline recognition, explicitly select a local model instead.
+4. Keep **Live preview, then pause pieces if unavailable** selected. Speak into a text editor with Handy’s normal shortcut. The bottom overlay identifies the active source throughout recording and finalization.
 
-1. Open [Google AI Studio API keys](https://aistudio.google.com/apikey) and sign in.
-2. Choose **Create API key**. Use a new project dedicated to Handy with no linked billing account. Do not select an existing project with billing enabled.
-3. Copy the API key and save your own backup in 1Password. Do not send it through Paperclip, chat, email, or a screenshot.
-4. Leave billing unlinked. The app never changes Google project billing. A key from a billed project does not become free-only because this app is selected.
+The key is stored through Linux Secret Service/GNOME Keyring. If unavailable, Handy reports its private-file fallback: `~/.local/share/com.pais.handy/gemini-credentials/api-key` (or the corresponding `$XDG_DATA_HOME` path), file mode 0600 in a 0700 directory. It is never in settings JSON or diagnostic logs.
 
-## Set up Google dictation
+## Read the overlay
 
-1. Open **Handy → Settings → General → Google Gemini (cloud)**. The same controls are on the Models page. A new install also offers Google during the model-selection step without requiring a local-model download.
-2. Paste the key into **Gemini API key** and click **Verify model and save key**. Handy calls Google's `ListModels` endpoint and displays a compatible, non-streaming Transcribe model actually returned for this key. Setup stops if none is available; it does not guess a model ID or silently choose another provider.
-3. Check the key-storage line. Handy first uses **GNOME Keyring / Secret Service**. If that service is absent or locked and cannot save, it uses a private file with mode **0600**, inside a mode-700 `gemini-credentials` directory under Handy's application data directory. On a normal Ubuntu install this is `$XDG_DATA_HOME/com.pais.handy/gemini-credentials/api-key`, or `~/.local/share/com.pais.handy/gemini-credentials/api-key` if `XDG_DATA_HOME` is unset. The key is not written to Handy's settings JSON. The storage choice is shown in Settings; the password field clears after saving.
-4. Click **Choose Google Gemini**. Keep **Allow local fallback** off. Local speech and language models unload. Cloud capture bypasses filtering, local speech decoding, and the spectrum FFT; pause detection runs on its separate worker.
-5. Under **Settings → Advanced → Custom Words**, add lender, street, and person names you commonly dictate. The existing list is sent as vocabulary hints with each clip.
-6. Click into a text box outside Handy, use the normal dictation shortcut, speak, and release the key. Live mode sends PCM while recording and shows an overlay preview. After release Google finalizes the transcript and Handy uses its existing paste-at-cursor path. Select Single upload for the original comparison mode.
+- **Google: connecting**: capture has started and audio is buffered while the socket connects. The bounded queue holds approximately 65 seconds; its overflow is an error and the independent full recording is saved.
+- **● Google live**: Google accepted the Live setup. Audio frames are sent continuously and only Google transcript messages populate the preview. The label identifies the connected engine; logs distinguish outgoing audio and received transcript activity.
+- **Google: pause pieces**: the selected mode uses pieces, Live is unavailable, or a Live connection failed. A one-line log explains the fallback. Pieces can take longer after release; this label does not promise Live latency.
+- **Google: uploading**: Single upload or an explicit file/history upload. This mode intentionally sends the complete file after recording.
+- **Google: error** or Handy’s error notice: the recording is retained. No partial hypothesis is pasted as a completed transcript.
+- **Local model**: offline recognition was explicitly selected.
 
-## X11 and Wayland
+Live sends the audio-stream-end marker on release, then waits up to 1.5 seconds for authoritative final text, with a short drain for independently ordered transcript messages. It does not switch to a whole-recording upload during a failed Live finalization. A timeout saves the clip for explicit retry instead of pasting an incomplete prefix. This bounded finalization targets a paste within about two seconds on a healthy connection; Google/network/hardware latency is not guaranteed.
 
-To identify your session, run `echo $XDG_SESSION_TYPE` in a terminal. It prints `x11` or `wayland`. This fork does not change Handy's clipboard, keyboard, shortcut, or paste implementations. Keep the same X11/Wayland paste tools and permissions your current Handy uses. If paste already works in the official app, keep those settings. Test pasting into an ordinary text editor before a business application.
+No local neural VAD runs in Google mode. A small RMS energy calculation identifies quiet frames for pause pieces and long-session rollover. It keeps **all** audio, including quiet speech; it only decides where a piece ends. Background noise can delay a boundary. Live reconnects near nine minutes at a quiet boundary; audio arriving during reconnect remains buffered.
 
-## If Google fails
+## Check streaming on the first laptop try
 
-Quota errors show **Gemini free limit reached**. Offline and timeout errors are reported too. Unary uploads have a 10-second network timeout. After an unrecoverable failure Handy keeps the clip in Handy's `gemini-pending` folder for recovery. Live failures switch to pause pieces when the configured unary quota permits. Failed unary uploads are not retried automatically. Each unary upload is bounded to five minutes; saved recordings can be longer.
+Start Handy with `--debug`, or use Handy’s log viewer. Never send the key or dictated content through an issue. Look for these metadata-only lines in order:
 
-- Click the destination text box and press **Ctrl+Shift+F8** to retry the oldest saved clip once and paste it. Change the shortcut in Google settings if it conflicts with another app.
-- To review before pasting, use **Retry oldest clip for preview**, then **Copy transcript**. A preview leaves the WAV saved.
-- **Open saved clips** opens the recovery folder. Pending WAVs survive restart and ordinary history cleanup. A successful shortcut retry-and-paste removes exactly that pending file. Delete previewed clips yourself when you no longer need them.
-- A local fallback model is available as an explicit opt-in. Choose a downloaded local model, then enable the checkbox. It loads only after a cloud failure and unloads after the clip. It uses CPU and is intentionally off by default.
+1. `gemini_capture local_model_loaded=false pause_detector=energy_only`
+2. `gemini_live setup_complete model=...` and overlay **● Google live**
+3. `gemini_live audio_out frames=... samples=...` while still speaking
+4. `gemini_live partial_in count=... audio_frames=...` **before release**, followed by more outgoing frames
+5. On release, `gemini_live audio_end` then `gemini_live finalized release_ms=...`
 
-To return fully to offline dictation, choose a downloaded local model from Handy's normal picker.
+If it switches to pieces, find `gemini_live fallback=pause_pieces reason=...`, optionally preceded by `server_error code=...` or `socket_closed code=...`. The reason excludes server-supplied text and credentials. This is the evidence missing from the .4 report. Share only those metadata lines to diagnose the actual failure.
 
-## What is tested and what still needs the laptop
+Use a 60-second and three-minute passage. Measure shortcut release to pasted text in the destination editor, record the overlay source and finalization duration, and check the leading words and sentence spaces. No Sophinvest test has yet measured Google recognition accuracy, real network latency, physical microphone continuity or laptop paste with Jean’s key. Local mock timings are transport evidence, not those results.
 
-Local tests use a mock HTTP server and fixture credentials, never a Google key. They cover model discovery, PCM/WAV encoding, vocabulary, verbatim mode, successful structured/plain responses, quota/auth/server errors, offline failure, timeout, and empty/truncated output. The credential-file test verifies 0600/0700 permissions, replacement, and rejection of unsafe permissions and symbolic links. The 60-second structural buffer comparison checks every sample, including silence. The real recording-sink test also covers a final partial frame and bypasses VAD/FFT.
+## Pieces, saved clips and quotas
 
-Mocks do not measure Google's accuracy or network latency. The 2–3 second release-to-paste target is still unmeasured against Google. The [.4 release](https://github.com/sophinvest/Handy/releases/tag/v0.10.0-gemini.4) passed native Linux compilation, 353 native tests (21 ignored), and clean Ubuntu startup for both packages. The AppImage was tested in extraction mode; actual FUSE mounting remains a laptop check. Physical microphone capture under full CPU load, Secret Service behavior on Jean's desktop, and X11/Wayland paste still need laptop results. Do not treat a mock transcript as a successful speech-recognition test.
+Configure unary requests/minute and requests/day from [your project limits](https://aistudio.google.com/rate-limit). Unknown limits stop piece uploads with the clip retained. The rolling-minute and Pacific-day counts include retries and file/history calls; other clients also consume the project quota. The app never guesses a free allowance or retries a failed request automatically.
 
-For a deliberate Linux CPU stress test, run `python3 scripts/gemini-cpu-stress.py --seconds 60` while dictating a known 60-second passage. It uses every CPU available to that test process and stops its own workers at the end or on Ctrl+C. Compare every pasted word with the reference and record release-to-paste time. The harness accesses no key, microphone, or clipboard itself. A dedicated capture thread avoids inference-related stalls, but no app can recover samples the operating system or audio driver never delivered.
+Pause targets are 30, 60 or 90 seconds. After the minimum target, a cut waits for 0.4 seconds of quiet. Continuous speech stays together, every sample belongs to one piece, and one request is reserved during recording for a final tail or retry. Unary uploads over five minutes fail with the recording preserved. Large/noisy uninterrupted clips may need manual subdivision.
 
-[Google transcription configuration](https://ai.google.dev/gemini-api/docs/generate-content/transcribe) · [Google ListModels](https://ai.google.dev/api/models)
+On an error, **Ctrl+Shift+F8** explicitly retries one remaining piece of the oldest saved clip, preserving completed progress; it pastes only after all pieces finish. **Retry oldest clip for preview** retains the WAV. **Open saved clips** opens the recovery folder. Successful retry-and-paste removes only that pending clip. Ordinary history retention never deletes pending clips. Retry uses the same model-free pause signal and segment joining as dictation.
 
-## Live dictation and accuracy controls (0.10.0-gemini.4 packages published)
+On Ubuntu, use `echo $XDG_SESSION_TYPE` to identify X11/Wayland. Keep the original Handy paste tools/permissions. Do not change session settings to obtain a screenshot. An optional AppImage needs FUSE and the host Vulkan loader; the `.deb` declares `libvulkan1`.
 
-The earlier 0.10.0-gemini.2 packages are single-upload prototypes. Version .3 has Live preview but still uses the earlier fixed chunk boundaries; the tunable targets below require .4 or later. Do not use them as evidence that Live preview works. In the .4 packages, **Cloud dictation mode** defaults to **Live preview, then pause pieces if unavailable**. Re-verify the key after upgrading so ListModels discovers both unary and Live model resources. The settings display the discovered Live resource; a missing resource selects cloud pause pieces. No API key is acquired by Sophinvest.
+## Verification and maintenance
 
-Partial hypotheses replace the tentative overlay text. Final text accumulates separately. Handy pastes the final combined transcript once after release. There is no type-into-other-apps-while-speaking feature. Local speech and language models remain unloaded; a one-thread Silero pause detector runs on the cloud worker, outside audio capture. Capture bypasses the original VAD filter and FFT and retains all samples.
+The transport suite exercises a complete mock WebSocket handshake, provisional and authoritative responses, finalization with/without turnComplete, final-after-turnComplete ordering, timeout preservation, segment spacing and real-time 60/180-second streams with delayed connection and exact audio counts. It uses no Google key. Native packaging and process evidence are listed with the release; do not infer a physical paste result from a socket test.
 
-Live sessions reconnect at a Silero pause after nine minutes, or after a server GoAway signal. The old connection must finalize before the new one opens. Audio arriving during that operation stays buffered. A bounded preview queue falling behind fails visibly and keeps the independent complete recording for recovery. This protects audio the recorder received; it cannot guarantee delivery of samples lost by a driver or a throttled operating system.
-
-For **Pause pieces**, copy the unary model’s **requests per minute** and **requests per day** caps from [your project’s AI Studio limits](https://aistudio.google.com/rate-limit), then save them in Google settings. These are configuration values, not guessed free-tier defaults. Leave them unknown and piece/unary uploads stop with the clip preserved. Counts cover this app’s unary calls, including retries and file/history transcription, with a midnight-Pacific daily reset and a persisted rolling-minute window. Other clients on the same project consume quota too. Google can still reject a request because of token or shared-project limits. The app warns at 80% of the configured daily request cap.
-
-**Pause-piece target** offers approximately **30, 60 or 90 seconds**, default **60**. Save the mode and limits to apply it; the same target is used for manual recovery. These are experimental minimum targets, not Google recommendations or promises of better accuracy. After the target, wait for at least 0.4 seconds of Silero non-speech. Brief pauses before the target do not trigger requests. Continuous speech is retained until a pause or release, rather than cut at a quiet-looking speech frame. VAD is imperfect, so inspect boundary errors in the real comparison. No audio overlap or text deduplication is introduced; intentional repetitions remain untouched. Every sample belongs to exactly one piece, including silence. Pending boundaries merge when quota is tight. During recording the app reserves one request in its configured minute/day windows for a final tail or explicit retry. With a one-request cap, pieces can therefore wait until release. Unary audio uploads remain capped at five minutes to keep inline payloads bounded. A continuous segment exceeding that bound is saved with an error, not forcibly cut or silently truncated. Open the saved WAV and recover it in suitably pause-aligned sections; the app does not claim automatic recovery can solve a segment with no eligible pause before that size limit. Previous text’s last sentence is context only, alongside the custom words; the model is instructed not to repeat it.
-
-If any piece fails, the complete WAV is retained. A private recovery file records the successfully transcribed prefix and its sample offset. Each explicit retry sends one remaining pause-cut piece, resumes from the saved offset, and keeps progress. Nothing is pasted until every remaining piece succeeds. A preview also retains the original WAV. Recordings up to one hour can be read by recovery; larger clips remain available in the saved-clips folder. No automatic quota retry loop or local speech fallback is enabled.
-
-Google’s [pricing page](https://ai.google.dev/gemini-api/docs/pricing/#gemini-3.5-transcribe-live) lists free input/output for Transcribe Live. The [rate-limit documentation](https://ai.google.dev/gemini-api/docs/rate-limits) gives project-dependent request/token limits, not a confirmed fixed free allowance per Live session or per audio minute. Published free eligibility is confirmed; access with your particular key and the exact free Live quota accounting remain unverified. We do not substitute paid per-token prices for that answer.
-
-For the requested same-audio comparison, follow [the comparison worksheet](gemini-comparison.md). It compares Live, pause targets of 30/60/90 seconds and single upload sequentially on one 3–5 minute WAV, then separately checks a physical 60-second dictation under all-core load. No Google accuracy, release-to-paste latency, or physical microphone result has been measured by Sophinvest. The .3 native benchmark measured Silero at 0.758104 calling-thread CPU seconds for 60 seconds of synthetic audio (1.2635% of one core); it excludes capture hardware, Google and networking.
-
-The native live-release checks also cover a stalled cloud consumer, draining the final partial frame after the recorder closes, and exclusive request ownership through cancellation/finalization. Short cloud recordings retain their original sample count. If a Live rollover cannot reconnect or finalize, the worker reprocesses the complete buffered recording as unary pause pieces; unknown or exhausted unary limits preserve the clip for retry. The Live overlay remains visible while finalization works unless overlays are disabled. These are local lifecycle checks, not evidence of Google access or physical microphone continuity.
+[Google Live Transcribe protocol](https://ai.google.dev/gemini-api/docs/live-api/live-transcribe) · [WebSocket reference](https://ai.google.dev/api/live) · [Pricing](https://ai.google.dev/gemini-api/docs/pricing/#gemini-3.5-transcribe-live) · [Maintenance](gemini-maintenance.md)

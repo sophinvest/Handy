@@ -2511,7 +2511,7 @@ dependencies = [
 
 [[package]]
 name = "handy"
-version = "0.10.0-gemini.4"
+version = "0.10.0-gemini.5"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2623,6 +2623,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "chrono-tz",
+ "log",
  "reqwest 0.12.28",
  "serde_json",
  "tungstenite",

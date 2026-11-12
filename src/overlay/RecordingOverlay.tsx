@@ -67,6 +67,8 @@ const RecordingOverlay: React.FC = () => {
     committed: "",
     tentative: "",
   });
+  const [engine, setEngine] = useState("local");
+  const engineUpdated = useRef(false);
   const [phase, setPhase] = useState<StreamPhase>("listening");
   const [workKind, setWorkKind] = useState<StreamWorkKind>("transcribing");
   const [elapsed, setElapsed] = useState(0);
@@ -107,6 +109,7 @@ const RecordingOverlay: React.FC = () => {
         // recording-ready while the awaits below are in flight; resetting after
         // them would overwrite that event and leave the overlay stuck arming.
         if (overlayState === "recording" || overlayState === "streaming") {
+          engineUpdated.current = false;
           setCaptureReady(false);
           smoothedLevelsRef.current = Array(16).fill(0);
           setLevels(Array(WAVE_BARS).fill(0));
@@ -119,6 +122,14 @@ const RecordingOverlay: React.FC = () => {
         try {
           const settings = await commands.getAppSettings();
           if (settings.status === "ok") {
+            if (!engineUpdated.current)
+              setEngine(
+                settings.data.selected_model === "google-gemini-cloud"
+                  ? settings.data.gemini_mode === "single"
+                    ? "google_uploading"
+                    : "google_connecting"
+                  : "local",
+              );
             setPosition(
               settings.data.overlay_position === "top" ? "top" : "bottom",
             );
@@ -166,6 +177,13 @@ const RecordingOverlay: React.FC = () => {
         setLevels(smoothed.slice(0, WAVE_BARS));
       });
 
+      const unlistenEngine = await listen<string>(
+        "transcription-engine",
+        (event) => {
+          engineUpdated.current = true;
+          setEngine(event.payload);
+        },
+      );
       const unlistenStream = await events.streamTextEvent.listen((event) => {
         setStreamText(event.payload);
       });
@@ -210,6 +228,7 @@ const RecordingOverlay: React.FC = () => {
         unlistenReady();
         unlistenLevel();
         unlistenStream();
+        unlistenEngine();
         unlistenPhase();
         unlistenModel();
         clearTimeout(modelLoadTimerRef.current);
@@ -317,7 +336,16 @@ const RecordingOverlay: React.FC = () => {
       <div className="sbase-l">
         <span className={`sdot ${captureReady ? "ready" : "arming"}`} />
       </div>
-      {waveform}
+      {engine === "local" ? (
+        <span className="sengine" data-engine={engine}>
+          {t("gemini.engine.local")}
+          {waveform}
+        </span>
+      ) : (
+        <span className="sengine" data-engine={engine}>
+          {t(`gemini.engine.${engine}`)}
+        </span>
+      )}
       <div className="sbase-r">
         {showTimer && <span className="stimer">{fmtTime(elapsed)}</span>}
         {showCancel && cancelBtn}
@@ -332,7 +360,9 @@ const RecordingOverlay: React.FC = () => {
       <div className="sbase-l">
         <span className="sspinner" />
       </div>
-      <span className="swork-label">{label}</span>
+      <span className="swork-label">
+        {engine.startsWith("google_") ? t(`gemini.engine.${engine}`) : label}
+      </span>
       <div className="sbase-r">{showCancel && cancelBtn}</div>
     </div>
   );

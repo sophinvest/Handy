@@ -616,6 +616,16 @@ impl ShortcutAction for TranscribeAction {
             OverlayStyle::Live | OverlayStyle::Minimal => show_recording_overlay(app),
             OverlayStyle::None => {} // show_overlay_state no-ops on None anyway
         }
+        if cloud {
+            crate::gemini_stream::engine(
+                app,
+                if settings.gemini_mode == "single" {
+                    "google_uploading"
+                } else {
+                    "google_connecting"
+                },
+            );
+        }
         // Everything above runs before capture can begin, so each span here is
         // added keypress->capture latency.
         debug!(

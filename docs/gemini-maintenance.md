@@ -102,3 +102,13 @@ Coverage: General, Models, initial and replacement onboarding share `GeminiSetti
 The Ubuntu .4 native review also checks legacy settings default to 60 seconds, all supported targets round-trip, invalid targets/zero known caps are rejected, and uninterrupted speech beyond the unary upload limit remains sample-exact and fails encoding without mutation. The shared command uses the same validation helper exercised by its native regression test. Reuse the .3 callback-buffer and Silero CPU evidence when those implementations are unchanged; these synthetic measurements do not establish Google accuracy or physical microphone continuity.
 
 The shared cloud form refreshes background status on focus and clip events without resetting unsaved mode, target or quota edits. Linux native select popups can return window focus before Save is clicked; treating that event as a full form reload discards the chosen target. Initial load and explicit completed actions still synchronize the form from native settings. Check actual mouse selection and Save/reload in General, Models and onboarding after future UI updates.
+
+## .5 corrective release
+
+The Google mode path must not load any local model, including Silero VAD and a legacy opt-in fallback. `gemini_stream.rs` and saved-clip retry now use a shared model-free energy signal in `pieces.rs`; `transcription.rs` rejects local loads while Gemini is selected. Keep these guards during an upstream merge. All dictated samples remain authoritative in CaptureSink’s independent buffer.
+
+`live.rs` performs the same complete setup in production and mock tests. It logs counters and safe numeric failure codes, keeps secrets/text out of diagnostics, joins authoritative utterances with separators, and bounds release finalization. Preserve transcript messages arriving independently of turnComplete. Never restore a silent release-time whole-file fallback. The overlay’s source indicator is translated and follows actual backend state; it must remain visible during finalization too.
+
+Additional upstream surfaces changed by .5: `src/overlay/RecordingOverlay.tsx` and `.css`. Models uses compact expandable Google setup, shows the full upstream local list, and no longer hides uncurated choices behind a text search. Local models remain handled by Handy’s existing table/picker/tray. File/history deliberately remains unary upload.
+
+The pause/limit algorithm now carries its first English narration at the top of `pieces.rs`. Before .5 there was no narration block. Version 1.0 documents the energy signal, minimum/quiet boundary, exact partition and quota headroom; future rule changes must bump it.

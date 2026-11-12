@@ -1,13 +1,12 @@
-//! Network/VAD worker for cloud dictation. Capture only try-sends frames: network,
-//! disk and Silero inference never run on the recorder delivery thread. The
+//! Network worker for cloud dictation. Capture only try-sends frames: network
+//! and model-free pause scoring never run on the recorder delivery thread. The
 //! recorder's independent buffer is authoritative if this bounded queue fills.
 use crate::{
-    audio_toolkit::{SileroVad, SpeechScorer, VoiceActivityDetector},
     gemini,
     settings::{get_settings, write_settings},
 };
 use handy_gemini::{
-    live::Live,
+    live::{append_segment, Live},
     pieces::{Cutter, Limiter, FRAME},
 };
 use serde_json::{json, Value};
@@ -40,6 +39,10 @@ pub fn active() -> bool {
     SESSION.lock().map(|s| s.is_some()).unwrap_or(true)
 }
 static LAST_PREVIEW: Mutex<Option<(String, String, Instant)>> = Mutex::new(None);
+pub fn engine(app: &AppHandle, state: &str) {
+    log::info!("dictation_engine state={} local_inference=disabled", state);
+    let _ = app.emit("transcription-engine", state);
+}
 fn preview(app: &AppHandle, committed: &str, tentative: &str) {
     if let Ok(mut last) = LAST_PREVIEW.lock() {
         if let Some((c, t, at)) = last.as_ref() {
@@ -65,8 +68,17 @@ pub fn begin(app: &AppHandle) -> Result<crate::audio_toolkit::audio::AudioFrameC
     if slot.is_some() {
         return Err("Finish the current cloud recording first".into());
     }
+    let tm = app.state::<Arc<crate::managers::transcription::TranscriptionManager>>();
+    if tm.is_model_loaded() {
+        tm.unload_model()
+            .map_err(|_| "Cannot unload the local model before Google recording")?;
+    }
+    log::info!(
+        "gemini_capture local_model_loaded={} pause_detector=energy_only",
+        tm.is_model_loaded()
+    );
     let guard = gemini::request_guard()?;
-    let (tx, rx) = mpsc::sync_channel::<Vec<f32>>(512); // ~16 s; bounded, no capture wait.
+    let (tx, rx) = mpsc::sync_channel::<Vec<f32>>(2048); // ~65 s; bounded, no capture wait.
     let (reply, result) = mpsc::channel();
     let stop = Arc::new(AtomicBool::new(false));
     let lost = Arc::new(AtomicBool::new(false));
@@ -81,6 +93,9 @@ pub fn begin(app: &AppHandle) -> Result<crate::audio_toolkit::audio::AudioFrameC
         .name("gemini-cloud".into())
         .spawn(move || {
             let answer = worker(&app, rx, &ws, &wl, &wc, &wr, &wp);
+            if answer.is_err() {
+                engine(&app, "google_error");
+            }
             let _ = reply.send((answer, guard));
         })
         .map_err(|_| "Cannot start cloud worker")?;
@@ -273,25 +288,36 @@ fn worker(
     let key = gemini::api_key(app)?;
     let model = settings.gemini_model.ok_or("Verify your key in Settings")?;
     let single = settings.gemini_mode == "single";
+    engine(
+        app,
+        if single {
+            "google_uploading"
+        } else {
+            "google_connecting"
+        },
+    );
     let mut live = if settings.gemini_mode == "auto" {
-        settings
-            .gemini_live_model
-            .as_deref()
-            .and_then(|m| Live::connect(&key, m, &settings.custom_words).ok())
+        match settings.gemini_live_model.as_deref() {
+            Some(m) => match Live::connect(&key, m, &settings.custom_words) {
+                Ok(l) => {
+                    engine(app, "google_live");
+                    Some(l)
+                }
+                Err(e) => {
+                    log::warn!("gemini_live fallback=pause_pieces reason={}", e);
+                    None
+                }
+            },
+            None => {
+                log::warn!("gemini_live fallback=pause_pieces reason=no_verified_live_model");
+                None
+            }
+        }
     } else {
         None
     };
-    let path = app
-        .path()
-        .resolve(
-            "resources/models/silero-vad-v6.2-F32.gguf",
-            tauri::path::BaseDirectory::Resource,
-        )
-        .map_err(|_| "Cannot locate pause detector")?;
-    let mut vad = SileroVad::new(path, 0.3)
-        .map_err(|_| "Cannot load Silero pause detector. Recording will be saved")?;
-    if vad.frame_samples() != FRAME {
-        return Err("Unsupported pause-detector frame size".into());
+    if live.is_none() && !single {
+        engine(app, "google_pieces");
     }
 
     let mut audio = Vec::new();
@@ -320,7 +346,12 @@ fn worker(
                 audio.extend_from_slice(&frame);
                 received.store(audio.len(), Ordering::Release);
                 if let Some(l) = live.as_mut() {
-                    if l.audio(&frame).and_then(|_| l.poll()).is_err() {
+                    if let Err(e) = l.audio(&frame).and_then(|_| l.poll()) {
+                        if stop.load(Ordering::Acquire) {
+                            return Err(format!("{e}. Clip saved; no release-time backfill"));
+                        }
+                        log::warn!("gemini_live fallback=pause_pieces reason={}", e);
+                        engine(app, "google_pieces");
                         // Never paste an incomplete live prefix. Reprocess this
                         // complete recording in pause pieces, in order.
                         live = None;
@@ -331,7 +362,7 @@ fn worker(
                         cut_base = 0;
                         boundary = 0;
                         cutter = Cutter::new(settings.gemini_chunk_seconds);
-                        vad.reset();
+
                         preview(app, "", "");
                     }
                 }
@@ -339,16 +370,17 @@ fn worker(
             Err(mpsc::RecvTimeoutError::Disconnected) => ended = true,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
-        let _ = stop;
         // Drain only through recv above. Never consume a probe frame here.
         if ended {
             finalizing = true;
         }
         while scanned + FRAME <= audio.len() {
             let frame = &audio[scanned..scanned + FRAME];
-            let probability = vad
-                .score(frame)
-                .map_err(|_| "Pause detection failed; clip saved")?[0];
+            let probability = if handy_gemini::pieces::is_speech(frame) {
+                1.0
+            } else {
+                0.0
+            };
             silence = if probability <= 0.3 {
                 silence + FRAME
             } else {
@@ -365,13 +397,7 @@ fn worker(
                 if (l.since.elapsed() >= Duration::from_secs(540) || l.go_away) && silence >= 6400 {
                     let next = match l.finish() {
                         Ok(t) => {
-                            if !prefix.is_empty()
-                                && !prefix.ends_with(char::is_whitespace)
-                                && !t.starts_with(char::is_whitespace)
-                            {
-                                prefix.push(' ');
-                            }
-                            prefix.push_str(&t);
+                            append_segment(&mut prefix, &t);
                             settings
                                 .gemini_live_model
                                 .as_deref()
@@ -381,6 +407,8 @@ fn worker(
                     };
                     live = next;
                     if live.is_none() {
+                        log::warn!("gemini_live fallback=pause_pieces reason=rollover_failed");
+                        engine(app, "google_pieces");
                         prefix.clear();
                         text.clear();
                         scanned = 0;
@@ -388,14 +416,19 @@ fn worker(
                         cut_base = 0;
                         boundary = 0;
                         cutter = Cutter::new(settings.gemini_chunk_seconds);
-                        vad.reset();
+
                         preview(app, "", "");
                     }
                 }
             }
         }
         if let Some(l) = live.as_mut() {
-            if l.poll().is_err() {
+            if let Err(e) = l.poll() {
+                if stop.load(Ordering::Acquire) {
+                    return Err(format!("{e}. Clip saved; no release-time backfill"));
+                }
+                log::warn!("gemini_live fallback=pause_pieces reason={}", e);
+                engine(app, "google_pieces");
                 live = None;
                 prefix.clear();
                 text.clear();
@@ -404,38 +437,23 @@ fn worker(
                 cut_base = 0;
                 boundary = 0;
                 cutter = Cutter::new(settings.gemini_chunk_seconds);
-                vad.reset();
+
                 preview(app, "", "");
                 continue;
             }
-            preview(
-                app,
-                &format!("{prefix}{}", l.text.committed),
-                &l.text.tentative,
-            );
+            let mut shown = prefix.clone();
+            append_segment(&mut shown, &l.text.committed);
+            preview(app, &shown, &l.text.tentative);
             if finalizing {
                 match l.finish() {
                     Ok(t) => {
-                        if !prefix.is_empty()
-                            && !prefix.ends_with(char::is_whitespace)
-                            && !t.starts_with(char::is_whitespace)
-                        {
-                            prefix.push(' ');
-                        }
-                        return Ok(format!("{prefix}{t}"));
+                        append_segment(&mut prefix, &t);
+                        return Ok(prefix);
                     }
-                    Err(_) => {
-                        live = None;
-                        prefix.clear();
-                        text.clear();
-                        scanned = 0;
-                        sent = 0;
-                        cut_base = 0;
-                        boundary = 0;
-                        cutter = Cutter::new(settings.gemini_chunk_seconds);
-                        vad.reset();
-                        preview(app, "", "");
-                        continue;
+                    Err(e) => {
+                        return Err(format!(
+                            "{e}. Live finalization failed; complete recording saved for retry"
+                        ))
                     }
                 }
             }
@@ -446,6 +464,12 @@ fn worker(
             if boundary > sent && can_send(app, finalizing) {
                 let wav =
                     handy_gemini::encode_wav(&audio[sent..boundary]).map_err(|e| e.to_string())?;
+                engine(app, "google_pieces");
+                log::info!(
+                    "gemini_piece audio_out samples={} finalizing={}",
+                    boundary - sent,
+                    finalizing
+                );
                 reserve(app)?;
                 let part = api
                     .transcribe_context(
@@ -456,10 +480,7 @@ fn worker(
                         &handy_gemini::pieces::last_sentence(&text),
                     )
                     .map_err(|e| e.to_string())?;
-                if !text.is_empty() {
-                    text.push(' ');
-                }
-                text.push_str(&part);
+                append_segment(&mut text, &part);
                 sent = boundary;
                 if let Ok(mut p) = progress.lock() {
                     p.offset = sent;

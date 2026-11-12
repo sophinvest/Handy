@@ -1,5 +1,17 @@
-//! Sample-exact pause partitioning and conservative quota scheduling. VAD scores
-//! are supplied by the app's one-thread Silero worker, never the capture thread.
+// ALGORITHM VERSION 1.0 — 2026-11-12
+// 1. Treat a 32 ms frame above -40 dB RMS as speech; retain every sample regardless.
+// 2. Wait for the 30/60/90 second minimum and 0.4 s quiet before a cut.
+// 3. Never force a boundary in continuous speech; each sample belongs to one piece.
+// 4. Unary requests need known minute/day caps; retain audio when capacity is missing.
+// 5. Reserve one request during capture for release/retry; reset daily counts in Pacific time.
+// A conservative energy gate replaces neural VAD so cloud mode loads no local model.
+// It may delay a cut in noise; it must never discard or shorten the original recording.
+// v1.0 — SOP-10742: model-free pause signal shared by capture and manual recovery.
+pub fn is_speech(frame: &[f32]) -> bool {
+    !frame.is_empty() && frame.iter().map(|s| s * s).sum::<f32>() / frame.len() as f32 > 0.0001
+}
+// Sample-exact pause partitioning and conservative quota scheduling.
+// Model-free energy scores run outside the capture thread.
 use std::collections::VecDeque;
 
 pub const RATE: usize = 16_000;
@@ -26,7 +38,7 @@ impl Cutter {
     }
     /// Return the end of at least 0.4 seconds of detected non-speech, after
     /// the configured target. Every sample, including silence, stays in order.
-    /// VAD can be wrong; we never add a second energy-based forced-cut guess.
+    /// Detection can be wrong; never force a cut inside continuous speech.
     pub fn push(&mut self, frame: &[f32], speech: bool) -> Option<usize> {
         self.since += frame.len();
         self.quiet = if speech { 0 } else { self.quiet + frame.len() };
@@ -186,5 +198,32 @@ mod tests {
         assert!(!l.allow(59_999, 1));
         assert!(l.allow(60_000, 1));
         assert!(!l.allow(120_000, 3));
+    }
+}
+
+#[cfg(test)]
+mod energy_tests {
+    #[test]
+    fn model_free_pause_signal_retains_quiet_and_speech_samples() {
+        assert!(!super::is_speech(&[0.0; 512]));
+        assert!(!super::is_speech(&[0.001; 512]));
+        assert!(super::is_speech(&[0.1; 512]));
+        let mut cutter = super::Cutter::new(30);
+        let mut boundaries = 0;
+        for _ in 0..1000 {
+            boundaries += usize::from(
+                cutter
+                    .push(&[0.1; 512], super::is_speech(&[0.1; 512]))
+                    .is_some(),
+            );
+        }
+        assert_eq!(boundaries, 0);
+        for _ in 0..13 {
+            if let Some(n) = cutter.push(&[0.0; 512], false) {
+                assert_eq!(n, 1013 * 512);
+                boundaries += 1;
+            }
+        }
+        assert_eq!(boundaries, 1);
     }
 }

@@ -534,6 +534,11 @@ impl TranscriptionManager {
             self.cancel_stream();
             return self.unload_model();
         }
+        if get_settings(&self.app_handle).selected_model == crate::gemini::MODEL_ID {
+            return Err(anyhow::anyhow!(
+                "Local model loading is disabled while Google Gemini is selected"
+            ));
+        }
         let load_start = std::time::Instant::now();
         debug!("Starting to load model: {}", model_id);
 
@@ -1008,7 +1013,7 @@ impl TranscriptionManager {
     ) -> Result<Transcription> {
         let cloud_settings = get_settings(&self.app_handle);
         if cloud_settings.selected_model == crate::gemini::MODEL_ID {
-            let (_request_guard, path, result) =
+            let (_request_guard, _path, result) =
                 crate::gemini::transcribe(&self.app_handle, &audio, recording)
                     .map_err(anyhow::Error::msg)?;
             match result {
@@ -1018,42 +1023,7 @@ impl TranscriptionManager {
                         language: None,
                     })
                 }
-                Err(error) => {
-                    if !cloud_settings.gemini_fallback
-                        || cloud_settings.gemini_fallback_model.is_empty()
-                    {
-                        return Err(anyhow::anyhow!(error));
-                    }
-                    let fallback = &cloud_settings.gemini_fallback_model;
-                    if fallback == crate::gemini::MODEL_ID {
-                        return Err(anyhow::anyhow!(error));
-                    }
-                    let local = self
-                        .load_model(fallback)
-                        .and_then(|_| self.decode_batch(audio))
-                        .map(|outcome| {
-                            let language = outcome
-                                .setup
-                                .spoken_language(outcome.model_detected_language.as_deref());
-                            Transcription {
-                                text: finish_text(outcome, &cloud_settings),
-                                language: Some(language),
-                            }
-                        });
-                    // Opt-in fallback never leaves the local inference worker resident.
-                    let unload = self.unload_model();
-                    if unload.is_err() {
-                        return Err(anyhow::anyhow!(
-                            "Local fallback could not unload. Restart Handy. Clip saved."
-                        ));
-                    }
-                    if local.is_ok() {
-                        let _ = std::fs::remove_file(path);
-                        let _ = self.app_handle.emit("gemini-clips-changed", ());
-                    }
-                    return local
-                        .map_err(|_| anyhow::anyhow!("{error} Local fallback also failed."));
-                }
+                Err(error) => return Err(anyhow::anyhow!(error)),
             }
         }
         #[cfg(debug_assertions)]

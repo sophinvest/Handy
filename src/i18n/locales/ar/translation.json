@@ -1043,6 +1043,16 @@
     "pasteRelease": "Live text is a preview only. Handy pastes once after release. Typing into other apps while speaking is disabled.",
     "chunkTarget": "Pause-piece target",
     "chunkSeconds": "About {{count}} seconds",
-    "chunkHint": "Wait for a detected pause after this target. Longer pieces may give more context but slower previews; accuracy is unmeasured. No forced mid-speech cut. A piece over five minutes stays saved for recovery."
+    "chunkHint": "Wait for a detected pause after this target. Longer pieces may give more context but slower previews; accuracy is unmeasured. No forced mid-speech cut. A piece over five minutes stays saved for recovery.",
+    "noLocalInference": "Google mode never runs local models. Choose a local model below for offline dictation.",
+    "cloudSetup": "Google Gemini (cloud) — choose or configure",
+    "engine": {
+      "local": "Local model",
+      "google_connecting": "Google: connecting",
+      "google_live": "● Google live",
+      "google_pieces": "Google: pause pieces",
+      "google_uploading": "Google: uploading",
+      "google_error": "Google: error"
+    }
   }
 }

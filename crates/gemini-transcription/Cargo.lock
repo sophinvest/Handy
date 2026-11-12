@@ -299,6 +299,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "chrono-tz",
+ "log",
  "reqwest",
  "serde_json",
  "tungstenite",

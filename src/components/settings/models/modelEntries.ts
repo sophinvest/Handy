@@ -9,10 +9,7 @@ import { useModelCatalog } from "@/hooks/useModelCatalog";
 import { averageError, type Grading } from "@/lib/models/grading";
 import { downloadStateOf } from "@/lib/models/downloadState";
 import type { TableModel } from "@/components/shared/modelTable/context";
-import {
-  isLegacyModel,
-  toTableModel,
-} from "@/components/shared/modelTable/tableModel";
+import { toTableModel } from "@/components/shared/modelTable/tableModel";
 import { suggestedLanguages } from "@/lib/utils/languageSuggestions";
 
 /** A model on the page: the table's own shape. */
@@ -50,12 +47,8 @@ export const useModelEntries = () => {
   const entries = useMemo(
     () =>
       infos
-        // Old .bin downloads only while they're still on disk.
-        .filter(
-          (info) =>
-            info.id !== "google-gemini-cloud" &&
-            (!isLegacyModel(info) || info.is_downloaded),
-        )
+        // Cloud has its own setup row. Every upstream local model stays visible.
+        .filter((info) => info.id !== "google-gemini-cloud")
         .map((info) => toTableModel(info, t)),
     [infos, t],
   );

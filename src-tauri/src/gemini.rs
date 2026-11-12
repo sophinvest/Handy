@@ -292,7 +292,7 @@ pub async fn gemini_status(app: AppHandle) -> Result<Status, String> {
             rpm: s.gemini_rpm,
             rpd: s.gemini_rpd,
             requests_today: crate::gemini_stream::usage(&app),
-            fallback: s.gemini_fallback,
+            fallback: false,
             fallback_model: s.gemini_fallback_model,
             pending: pending(&app)?.len(),
         })
@@ -332,10 +332,10 @@ pub async fn gemini_save_key(app: AppHandle, key: String) -> Result<Vec<String>,
 pub fn gemini_set_fallback(app: AppHandle, enabled: bool, model: String) -> Result<(), String> {
     let _guard = idle_guard()?;
     if enabled {
-        let mm = app.state::<Arc<crate::managers::model::ModelManager>>();
-        if model == MODEL_ID || !mm.get_model_info(&model).is_some_and(|m| m.is_downloaded) {
-            return Err("Select a downloaded local model for fallback".into());
-        }
+        return Err(
+            "Google mode never runs local models. Select a local model to use offline dictation"
+                .into(),
+        );
     }
     let mut s = get_settings(&app);
     s.gemini_fallback = enabled;
@@ -387,23 +387,11 @@ pub fn retry(app: &AppHandle, paste: bool) -> Result<String, String> {
         return Err("Recovery progress is outside the saved clip".into());
     }
     if progress.offset < samples.len() {
-        use crate::audio_toolkit::{SileroVad, SpeechScorer};
-        let path = app
-            .path()
-            .resolve(
-                "resources/models/silero-vad-v6.2-F32.gguf",
-                tauri::path::BaseDirectory::Resource,
-            )
-            .map_err(|_| "Cannot locate pause detector")?;
-        let mut vad = SileroVad::new(path, 0.3).map_err(|_| "Cannot load pause detector")?;
         let tail = &samples[progress.offset..];
         let mut cutter = handy_gemini::pieces::Cutter::new(get_settings(app).gemini_chunk_seconds);
         let mut cut = tail.len();
         for frame in tail.chunks_exact(handy_gemini::pieces::FRAME) {
-            if let Some(n) = cutter.push(
-                frame,
-                vad.score(frame).map_err(|_| "Pause detection failed")?[0] > 0.3,
-            ) {
+            if let Some(n) = cutter.push(frame, handy_gemini::pieces::is_speech(frame)) {
                 cut = n;
                 break;
             }
@@ -423,10 +411,7 @@ pub fn retry(app: &AppHandle, paste: bool) -> Result<String, String> {
                 &handy_gemini::pieces::last_sentence(&progress.text),
             )
             .map_err(|e| failed(app, e))?;
-        if !progress.text.is_empty() {
-            progress.text.push(' ');
-        }
-        progress.text.push_str(&part);
+        handy_gemini::live::append_segment(&mut progress.text, &part);
         progress.offset += cut;
         // Recovery updates are atomic and private, just like the saved WAV.
         use std::io::Write;
