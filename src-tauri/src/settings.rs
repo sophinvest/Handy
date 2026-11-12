@@ -1008,8 +1008,8 @@ pub fn get_default_settings() -> AppSettings {
         "gemini_retry".to_string(),
         ShortcutBinding {
             id: "gemini_retry".into(),
-            name: "Retry Saved Gemini Clip".into(),
-            description: "Retry the oldest saved cloud recording and paste it at the cursor."
+            name: "Retry last failed clip".into(),
+            description: "Retry the most recent saved cloud recording and paste it at the cursor."
                 .into(),
             default_binding: "ctrl+shift+f8".into(),
             current_binding: "ctrl+shift+f8".into(),

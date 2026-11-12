@@ -755,13 +755,21 @@ async geminiSetFallback(enabled: boolean, model: string) : Promise<Result<null, 
     else return { status: "error", error: e  as any };
 }
 },
-async geminiRetryClip() : Promise<Result<string, string>> {
+async geminiRetryClip(clipId: string | null) : Promise<Result<string, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("gemini_retry_clip") };
+    return { status: "ok", data: await TAURI_INVOKE("gemini_retry_clip", { clipId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+async geminiListClips() : Promise<Result<SavedClip[], string>> {
+    try { return { status: "ok", data: await TAURI_INVOKE("gemini_list_clips") }; }
+    catch (e) { if(e instanceof Error) throw e; else return { status: "error", error: e as any }; }
+},
+async geminiDeleteClip(clipId: string) : Promise<Result<null, string>> {
+    try { return { status: "ok", data: await TAURI_INVOKE("gemini_delete_clip", { clipId }) }; }
+    catch (e) { if(e instanceof Error) throw e; else return { status: "error", error: e as any }; }
 },
 async geminiOpenClips() : Promise<Result<null, string>> {
     try {
@@ -1675,3 +1683,5 @@ function __makeEvents__<T extends Record<string, any>>(
 		},
 	);
 }
+
+export type SavedClip = { id: string; saved_at_ms: number; duration_seconds: number | null };

@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures/browser";
 
 test.describe("Handy App", () => {
   test("dev server responds", async ({ page }) => {

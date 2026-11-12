@@ -1,11 +1,11 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { useTranslation } from "react-i18next";
 import { commands } from "@/bindings";
 import { useModelStore } from "@/stores/modelStore";
 import { ShortcutInput } from "./ShortcutInput";
+import { SavedClips } from "./SavedClips";
 import { SettingsGroup } from "../ui/SettingsGroup";
 
 export const GEMINI_ENGINE = "google-gemini-cloud";
@@ -34,7 +34,7 @@ export const GeminiSettings: React.FC<{
   const [key, setKey] = useState("");
   const [working, setWorking] = useState(false);
   const [message, setMessage] = useState("");
-  const [preview, setPreview] = useState("");
+  const busy = useRef(false);
   const [mode, setMode] = useState("auto");
   const [chunkSeconds, setChunkSeconds] = useState(60);
   const [rpm, setRpm] = useState("");
@@ -69,6 +69,8 @@ export const GeminiSettings: React.FC<{
     if (!disabled) refresh().catch(() => setMessage(t("gemini.settingsError")));
   }, [disabled]);
   const run = async (action: () => Promise<void>) => {
+    if (busy.current) return;
+    busy.current = true;
     setWorking(true);
     setMessage("");
     try {
@@ -77,6 +79,7 @@ export const GeminiSettings: React.FC<{
     } catch (error) {
       setMessage(String(error));
     } finally {
+      busy.current = false;
       setWorking(false);
     }
   };
@@ -228,54 +231,10 @@ export const GeminiSettings: React.FC<{
         <p className="text-sm text-ink-2">{t("gemini.pasteRelease")}</p>
         <p className="text-sm text-ink-2">{t("gemini.noLocalInference")}</p>
         <ShortcutInput shortcutId="gemini_retry" grouped />
-        <p className="text-sm">
-          {t("gemini.pending", { count: status?.pending ?? 0 })}
-        </p>
-        <button
-          className="border border-line rounded px-3 py-2"
-          disabled={
-            locked || !status?.pending || currentModel !== GEMINI_ENGINE
-          }
-          onClick={() =>
-            run(async () => {
-              setPreview(await invoke<string>("gemini_retry_clip"));
-            })
-          }
-        >
-          {t("gemini.retry")}
-        </button>
-        <button
-          className="ms-2 border border-line rounded px-3 py-2"
+        <SavedClips
           disabled={locked}
-          onClick={() =>
-            run(async () => {
-              await invoke("gemini_open_clips");
-            })
-          }
-        >
-          {t("gemini.openClips")}
-        </button>
-        {preview && (
-          <>
-            <textarea
-              className="block w-full border border-line rounded p-2"
-              readOnly
-              value={preview}
-              aria-label={t("gemini.transcript")}
-            />
-            <button
-              className="border border-line rounded px-3 py-2"
-              onClick={() =>
-                run(async () => {
-                  await writeText(preview);
-                  setMessage(t("gemini.copied"));
-                })
-              }
-            >
-              {t("gemini.copy")}
-            </button>
-          </>
-        )}
+          canRetry={currentModel === GEMINI_ENGINE}
+        />
         <p role="status" className="text-sm whitespace-pre-wrap">
           {working ? t("gemini.working") : message}
         </p>

@@ -354,8 +354,8 @@
             "description": "اختياري: مفتاح اختصار مخصص يطبق دائماً المعالجة اللاحقة بالذكاء الاصطناعي على التفريغ الصوتي."
           },
           "gemini_retry": {
-            "name": "Retry Saved Gemini Clip",
-            "description": "Retry the oldest saved cloud recording and paste it at the cursor."
+            "name": "Retry last failed clip",
+            "description": "Retry the most recent saved cloud recording and deliver it using your dictation output settings."
           }
         },
         "errors": {
@@ -1016,7 +1016,7 @@
     "pending": "Saved clips: {{count}}",
     "pending_one": "Saved clips: {{count}}",
     "pending_other": "Saved clips: {{count}}",
-    "retry": "Retry oldest clip for preview",
+    "retry": "Retry last failed clip",
     "openClips": "Open saved clips",
     "transcript": "Recovered transcript",
     "copy": "Copy transcript",
@@ -1053,6 +1053,16 @@
       "google_pieces": "Google: pause pieces",
       "google_uploading": "Google: uploading",
       "google_error": "Google: error"
-    }
+    },
+    "retryClip": "Retry",
+    "deleteClip": "Delete",
+    "emptyClips": "No saved failed clips.",
+    "clipTime": "Saved {{time}} · {{duration}}",
+    "unknownDuration": "duration unavailable",
+    "clipsTitle": "Saved failed clips, newest first",
+    "retryHint": "Retry uploads only the selected clip. Text uses your dictation output settings. For paste, Handy hides this window to return to your previous application. You can also use the retry shortcut in your target application.",
+    "delivered": "Text delivered using your dictation output settings.",
+    "deleted": "Saved clip deleted.",
+    "listError": "Could not refresh saved clips. Try opening this panel again."
   }
 }

@@ -1117,7 +1117,7 @@ struct GeminiRetryAction;
 impl ShortcutAction for GeminiRetryAction {
     fn start(&self, app: &AppHandle, _binding_id: &str, _shortcut_str: &str) {
         let app = app.clone();
-        std::thread::spawn(move || match crate::gemini::retry(&app, true) {
+        std::thread::spawn(move || match crate::gemini::retry(&app, None, false) {
             Ok(_) => notices::clear(&app, NoticeSource::Dictation),
             Err(detail) => notices::raise(
                 &app,

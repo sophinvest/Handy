@@ -129,15 +129,8 @@ fn pending_dir(app: &AppHandle) -> Result<PathBuf, String> {
     }
     Ok(dir)
 }
-fn pending(app: &AppHandle) -> Result<Vec<PathBuf>, String> {
-    let mut files: Vec<_> = fs::read_dir(pending_dir(app)?)
-        .map_err(|_| "Cannot read saved recordings")?
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "wav"))
-        .collect();
-    files.sort();
-    Ok(files)
+fn pending(app: &AppHandle) -> Result<Vec<crate::saved_clips::SavedClip>, String> {
+    crate::saved_clips::list(&pending_dir(app)?)
 }
 fn save(app: &AppHandle, samples: &[f32]) -> Result<PathBuf, String> {
     // Save before network/encoding limits. The ordinary history retention job
@@ -343,7 +336,11 @@ pub fn gemini_set_fallback(app: AppHandle, enabled: bool, model: String) -> Resu
     write_settings(&app, s);
     Ok(())
 }
-pub fn retry(app: &AppHandle, paste: bool) -> Result<String, String> {
+pub fn retry(
+    app: &AppHandle,
+    clip_id: Option<&str>,
+    from_settings: bool,
+) -> Result<String, String> {
     let _guard = idle_guard()?;
     if get_settings(app).selected_model != MODEL_ID {
         return Err("Choose Google Gemini before retrying".into());
@@ -354,12 +351,46 @@ pub fn retry(app: &AppHandle, paste: bool) -> Result<String, String> {
     }
     let tm = app.state::<Arc<TranscriptionManager>>();
     tm.ensure_model_unlocked()?;
-    let path = pending(app)?
-        .into_iter()
-        .next()
-        .ok_or("No saved Gemini clips to retry")?;
+    let dir = pending_dir(app)?;
+    let text = crate::saved_clips::recover(
+        &dir,
+        clip_id,
+        |path| recover_text(app, path),
+        |text| {
+            let settings = get_settings(app);
+            if settings.paste_method == crate::settings::PasteMethod::None
+                && settings.clipboard_handling
+                    != crate::settings::ClipboardHandling::CopyToClipboard
+            {
+                return Err("Text delivery is disabled. Enable a paste method or Copy to clipboard; the clip is still saved".into());
+            }
+            let window = app.get_webview_window("main");
+            let hide = from_settings && settings.paste_method != crate::settings::PasteMethod::None;
+            if hide {
+                if let Some(window) = &window {
+                    window.hide().map_err(|_| {
+                        "Cannot return to the target application; clip is still saved"
+                    })?;
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+            }
+            let result = crate::utils::paste(text.to_owned(), app.clone())
+                .map_err(|e| format!("Text delivery failed: {e}. The clip is still saved"));
+            if hide && result.is_err() {
+                if let Some(window) = &window {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+            result
+        },
+    );
+    let _ = app.emit("gemini-clips-changed", ());
+    text
+}
+fn recover_text(app: &AppHandle, path: &std::path::Path) -> Result<String, String> {
     // Enforce the same size limit on recovery, without loading an unbounded file.
-    if fs::metadata(&path)
+    if fs::metadata(path)
         .map_err(|_| "Cannot read saved clip")?
         .len()
         > 44 + (16_000 * 3600 * 2) as u64
@@ -368,7 +399,7 @@ pub fn retry(app: &AppHandle, paste: bool) -> Result<String, String> {
             "Saved clip exceeds the one-hour recovery limit. Open the saved clips folder".into(),
         );
     }
-    let wav = fs::read(&path).map_err(|_| "Cannot read saved clip")?;
+    let wav = fs::read(path).map_err(|_| "Cannot read saved clip")?;
     let recovery = path.with_extension("json");
     let mut progress: crate::gemini_stream::Progress = if recovery.exists() {
         serde_json::from_slice(&fs::read(&recovery).map_err(|_| "Cannot read recovery progress")?)
@@ -434,24 +465,12 @@ pub fn retry(app: &AppHandle, paste: bool) -> Result<String, String> {
             return Err("One saved piece transcribed. The complete clip is still saved. Retry again when quota permits; nothing has been pasted yet".into());
         }
     }
-    let text = progress.text;
-    if paste {
-        crate::utils::paste(text.clone(), app.clone())
-            .map_err(|_| "Paste failed. The clip is still saved")?;
-    }
-    // The settings preview may be copied or pasted later, so keep its recording.
-    if paste {
-        fs::remove_file(path).map_err(|_| "Text pasted, but saved clip could not be removed")?;
-        if recovery.exists() {
-            let _ = fs::remove_file(recovery);
-        }
-    }
-    Ok(text)
+    Ok(progress.text)
 }
 #[tauri::command]
 #[specta::specta]
-pub async fn gemini_retry_clip(app: AppHandle) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || retry(&app, false))
+pub async fn gemini_retry_clip(app: AppHandle, clip_id: Option<String>) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || retry(&app, clip_id.as_deref(), true))
         .await
         .map_err(|_| "Retry failed".to_string())?
 }
@@ -462,4 +481,21 @@ pub fn gemini_open_clips(app: AppHandle) -> Result<(), String> {
     app.opener()
         .open_path(pending_dir(&app)?.to_string_lossy(), None::<String>)
         .map_err(|_| "Cannot open saved clips folder".into())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn gemini_list_clips(app: AppHandle) -> Result<Vec<crate::saved_clips::SavedClip>, String> {
+    pending(&app)
+}
+#[tauri::command]
+#[specta::specta]
+pub fn gemini_delete_clip(app: AppHandle, clip_id: String) -> Result<(), String> {
+    let _guard = idle_guard()?;
+    if app.state::<Arc<AudioRecordingManager>>().is_recording() {
+        return Err("Finish recording before deleting a clip".into());
+    }
+    crate::saved_clips::delete(&pending_dir(&app)?, &clip_id)?;
+    let _ = app.emit("gemini-clips-changed", ());
+    Ok(())
 }

@@ -23,6 +23,7 @@ mod notices;
 mod overlay;
 mod paste_tx;
 pub mod portable;
+mod saved_clips;
 mod secure_input;
 mod settings;
 mod shortcut;
@@ -779,6 +780,8 @@ pub fn run(cli_args: CliArgs) {
             gemini::gemini_save_key,
             gemini::gemini_set_fallback,
             gemini::gemini_retry_clip,
+            gemini::gemini_list_clips,
+            gemini::gemini_delete_clip,
             gemini::gemini_open_clips,
             commands::models::download_language_detector,
             commands::models::is_language_detector_downloaded,
