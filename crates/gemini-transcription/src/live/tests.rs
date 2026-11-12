@@ -38,8 +38,13 @@ fn accept(listener: TcpListener) -> WebSocket<TcpStream> {
         setup["setup"]["inputAudioTranscription"]["customVocabulary"][0],
         "Whatagraph"
     );
+    assert_eq!(
+        setup["setup"]["realtimeInputConfig"]["automaticActivityDetection"]["disabled"],
+        true
+    );
     ws.send(Message::Ping(vec![1].into())).unwrap();
     send(&mut ws, json!({"setupComplete":{}}));
+    assert!(read(&mut ws)["realtimeInput"]["activityStart"].is_object());
     ws
 }
 #[test]
@@ -72,7 +77,7 @@ fn final_after_turn_complete_and_final_without_turn_complete_are_drained() {
                 &mut ws,
                 json!({"serverContent":{"interimInputTranscription":{"text":"Next"}}}),
             );
-            assert_eq!(read(&mut ws)["realtimeInput"]["audioStreamEnd"], true);
+            assert!(read(&mut ws)["realtimeInput"]["activityEnd"].is_object());
             if turn_first {
                 send(&mut ws, json!({"serverContent":{"turnComplete":true}}));
                 thread::sleep(Duration::from_millis(60));
@@ -107,7 +112,7 @@ fn missing_final_is_bounded_and_never_promotes_tentative_text() {
             &mut ws,
             json!({"serverContent":{"interimInputTranscription":{"text":"unfinished"}}}),
         );
-        assert_eq!(read(&mut ws)["realtimeInput"]["audioStreamEnd"], true);
+        assert!(read(&mut ws)["realtimeInput"]["activityEnd"].is_object());
         thread::sleep(Duration::from_millis(1800));
     });
     let mut live = client(addr);
@@ -115,6 +120,162 @@ fn missing_final_is_bounded_and_never_promotes_tentative_text() {
     let start = Instant::now();
     assert_eq!(live.finish(), Err(Error::Timeout));
     assert!(start.elapsed() < Duration::from_secs(2));
+    server.join().unwrap();
+}
+#[test]
+fn final_received_before_release_does_not_need_another_final() {
+    for close_after_end in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let mut ws = accept(listener);
+            assert!(read(&mut ws)["realtimeInput"]["audio"].is_object());
+            send(
+                &mut ws,
+                json!({"serverContent":{"inputTranscription":{"text":"Already finished."}}}),
+            );
+            assert!(read(&mut ws)["realtimeInput"]["activityEnd"].is_object());
+            if close_after_end {
+                ws.close(None).unwrap();
+            } else {
+                thread::sleep(Duration::from_millis(1800));
+            }
+        });
+        let mut live = client(addr);
+        live.audio(&[0.25; 512]).unwrap();
+        let until = Instant::now() + Duration::from_secs(1);
+        while live.text.committed.is_empty() && Instant::now() < until {
+            live.poll().unwrap();
+        }
+        assert_eq!(live.text.committed, "Already finished.");
+        let start = Instant::now();
+        assert_eq!(live.finish().unwrap(), "Already finished.");
+        assert!(start.elapsed() < Duration::from_secs(2));
+        server.join().unwrap();
+    }
+}
+#[test]
+fn prior_final_never_promotes_a_new_unfinished_tail() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let mut ws = accept(listener);
+        read(&mut ws);
+        send(
+            &mut ws,
+            json!({"serverContent":{"inputTranscription":{"text":"First sentence."}}}),
+        );
+        send(
+            &mut ws,
+            json!({"serverContent":{"interimInputTranscription":{"text":"unfinished tail"}}}),
+        );
+        assert!(read(&mut ws)["realtimeInput"]["activityEnd"].is_object());
+        thread::sleep(Duration::from_millis(1800));
+    });
+    let mut live = client(addr);
+    live.audio(&[0.25; 512]).unwrap();
+    let until = Instant::now() + Duration::from_secs(1);
+    while live.text.tentative.is_empty() && Instant::now() < until {
+        live.poll().unwrap();
+    }
+    assert_eq!(live.text.committed, "First sentence.");
+    assert_eq!(live.finish(), Err(Error::Timeout));
+    assert_eq!(live.text.tentative, "unfinished tail");
+    server.join().unwrap();
+}
+#[test]
+fn pause_boundary_finalizes_during_capture_without_losing_or_repeating_samples() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let mut ws = accept(listener);
+        let mut frames = 0;
+        let mut ends = 0;
+        loop {
+            let v = read(&mut ws);
+            if v["realtimeInput"]["activityEnd"].is_object() {
+                ends += 1;
+                if ends == 1 {
+                    assert_eq!(frames, 951);
+                    thread::sleep(Duration::from_millis(300));
+                    send(
+                        &mut ws,
+                        json!({"serverContent":{"inputTranscription":{"text":"First sentence."}}}),
+                    );
+                    assert!(read(&mut ws)["realtimeInput"]["activityStart"].is_object());
+                } else {
+                    assert_eq!(ends, 2);
+                    assert_eq!(frames, 982);
+                    send(
+                        &mut ws,
+                        json!({"serverContent":{"inputTranscription":{"text":"Second sentence."}}}),
+                    );
+                    ws.close(None).unwrap();
+                    break;
+                }
+                continue;
+            }
+            let pcm = STANDARD
+                .decode(v["realtimeInput"]["audio"]["data"].as_str().unwrap())
+                .unwrap();
+            let value: f32 = if frames < 938 {
+                0.25
+            } else if frames < 951 {
+                0.0
+            } else {
+                0.5
+            };
+            let sample = ((value * 32767.0).round() as i16).to_le_bytes();
+            assert_eq!(pcm.len(), 1024);
+            assert!(pcm.as_chunks::<2>().0.iter().all(|bytes| *bytes == sample));
+            frames += 1;
+        }
+    });
+    let mut live = client(addr);
+    for i in 0..982 {
+        let value = if i < 938 {
+            0.25
+        } else if i < 951 {
+            0.0
+        } else {
+            0.5
+        };
+        live.audio(&[value; 512]).unwrap();
+        live.poll().unwrap();
+    }
+    assert!(!live.pending_audio.is_empty());
+    assert!(live.text.committed.is_empty());
+    assert_eq!(live.finish().unwrap(), "First sentence. Second sentence.");
+    server.join().unwrap();
+}
+#[test]
+fn pause_next_turn_missing_final_never_pastes_the_previous_turn() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let mut ws = accept(listener);
+        for _ in 0..951 {
+            assert!(read(&mut ws)["realtimeInput"]["audio"].is_object());
+        }
+        assert!(read(&mut ws)["realtimeInput"]["activityEnd"].is_object());
+        send(
+            &mut ws,
+            json!({"serverContent":{"inputTranscription":{"text":"Previous turn."}}}),
+        );
+        assert!(read(&mut ws)["realtimeInput"]["activityStart"].is_object());
+        for _ in 0..31 {
+            assert!(read(&mut ws)["realtimeInput"]["audio"].is_object());
+        }
+        assert!(read(&mut ws)["realtimeInput"]["activityEnd"].is_object());
+        thread::sleep(Duration::from_millis(1800));
+    });
+    let mut live = client(addr);
+    for i in 0..982 {
+        live.audio(&[if (938..951).contains(&i) { 0.0 } else { 0.25 }; 512])
+            .unwrap();
+        live.poll().unwrap();
+    }
+    assert_eq!(live.finish(), Err(Error::Timeout));
     server.join().unwrap();
 }
 // Production setup/audio/poll/finish with a real-time mock socket. No physical mic/paste.
@@ -142,7 +303,7 @@ fn paced_mock(seconds: usize) {
         let mut before = false;
         loop {
             let v = read(&mut ws);
-            if v["realtimeInput"]["audioStreamEnd"] == true {
+            if v["realtimeInput"]["activityEnd"].is_object() {
                 break;
             }
             let pcm = STANDARD
@@ -238,7 +399,7 @@ fn authoritative_final_is_not_discarded_when_server_closes_immediately() {
     let server = thread::spawn(move || {
         let mut ws = accept(listener);
         read(&mut ws);
-        assert_eq!(read(&mut ws)["realtimeInput"]["audioStreamEnd"], true);
+        assert!(read(&mut ws)["realtimeInput"]["activityEnd"].is_object());
         send(
             &mut ws,
             json!({"serverContent":{"inputTranscription":{"text":"Complete sentence."},"turnComplete":true}}),
@@ -263,7 +424,7 @@ fn delayed_final_without_interim_after_completion_keeps_the_last_words() {
             json!({"serverContent":{"inputTranscription":{"text":"First sentence."}}}),
         );
         read(&mut ws);
-        assert_eq!(read(&mut ws)["realtimeInput"]["audioStreamEnd"], true);
+        assert!(read(&mut ws)["realtimeInput"]["activityEnd"].is_object());
         send(&mut ws, json!({"serverContent":{"turnComplete":true}}));
         for part in ["The last", "words."] {
             thread::sleep(Duration::from_millis(300));

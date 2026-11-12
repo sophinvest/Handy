@@ -4,7 +4,7 @@ This Sophinvest fork adds Google Gemini alongside Handy’s local models. It use
 
 ## Install
 
-Quit Handy, download the `.deb` from [Sophinvest releases](https://github.com/sophinvest/Handy/releases), and install it with `sudo apt install ./Handy_0.10.0-gemini.5_amd64.deb`. Reopen Handy. Your settings and recordings remain in place. The unsigned package is published only in the Sophinvest repository. To roll back, quit and reinstall the official Handy package.
+Quit Handy, download the `.deb` from [Sophinvest releases](https://github.com/sophinvest/Handy/releases), and install it with `sudo apt install ./Handy_0.10.0-gemini.6_amd64.deb`. Reopen Handy. Your settings and recordings remain in place. The unsigned package is published only in the Sophinvest repository. To roll back, quit and reinstall the official Handy package.
 
 ## Choose Google or a local model
 
@@ -59,3 +59,9 @@ On Ubuntu, use `echo $XDG_SESSION_TYPE` to identify X11/Wayland. Keep the origin
 The transport suite exercises a complete mock WebSocket handshake, provisional and authoritative responses, finalization with/without turnComplete, final-after-turnComplete ordering (including several delayed finals with no interim packet), timeout preservation, segment spacing and real-time 60/180-second streams with delayed connection and exact audio counts. It uses no Google key. Native packaging and process evidence are listed with the release; do not infer a physical paste result from a socket test.
 
 [Google Live Transcribe protocol](https://ai.google.dev/gemini-api/docs/live-api/live-transcribe) · [WebSocket reference](https://ai.google.dev/api/live) · [Pricing](https://ai.google.dev/gemini-api/docs/pricing/#gemini-3.5-transcribe-live) · [Maintenance](gemini-maintenance.md)
+
+### Recording boundaries in gemini.6
+
+The Live connection uses explicit start/stop signals matching the recording button. This prevents Google's automatic speech detector from ending a sentence at an internal pause. Provisional Google words remain underlined until Google's final text arrives. Release drains incoming finals for up to 1.5 seconds; an unfinished hypothesis is never pasted as final, and the original clip remains available on failure. This is streaming, not a full-recording upload after release.
+
+For long recordings, Handy also finalizes a speech turn at a detected quiet pause after at least 30 seconds, using the same simple volume calculation as pause pieces. The connection remains Live, no samples are removed, and no local neural model runs. If continuous speech or noise supplies no pause and Google cannot finish in the short release window, Handy reports the failure and keeps the recording instead of pasting provisional text.

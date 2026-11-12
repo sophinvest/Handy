@@ -4,6 +4,7 @@ use crate::{Error, TIMEOUT};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
 use std::{
+    collections::VecDeque,
     net::{TcpStream, ToSocketAddrs},
     time::{Duration, Instant},
 };
@@ -62,6 +63,10 @@ pub struct Live {
     samples: usize,
     partials: usize,
     finals: usize,
+    pause_cutter: crate::pieces::Cutter,
+    boundary_wait: Option<(usize, Instant)>,
+    turn_needs_final: bool,
+    pending_audio: VecDeque<Vec<f32>>,
 }
 impl Live {
     pub fn connect(key: &str, model: &str, words: &[String]) -> Result<Self, Error> {
@@ -100,8 +105,13 @@ impl Live {
             samples: 0,
             partials: 0,
             finals: 0,
+            pause_cutter: crate::pieces::Cutter::new(30),
+            boundary_wait: None,
+            turn_needs_final: false,
+            pending_audio: VecDeque::new(),
         };
         this.send(json!({"setup":{"model":model,"generationConfig":{"responseModalities":["TEXT"]},
+            "realtimeInputConfig":{"automaticActivityDetection":{"disabled":true},"activityHandling":"NO_INTERRUPTION"},
             "inputAudioTranscription":{"mode":"VERBATIM","customVocabulary":words.iter().take(1000).collect::<Vec<_>>()}}}))?;
         let until = Instant::now() + TIMEOUT;
         loop {
@@ -130,8 +140,11 @@ impl Live {
             _ => return Err(Error::Unavailable),
         }
         .map_err(|_| Error::Offline)?;
+        // Recording, not Google's pause detector, owns this push-to-talk turn.
+        // Automatic endpointing truncated the public speech fixture mid-sentence.
+        this.send(json!({"realtimeInput":{"activityStart":{}}}))?;
         log::info!(
-            "gemini_live setup_complete model={} connect_ms={}",
+            "gemini_live setup_complete remote_manual_activity=true model={} connect_ms={}",
             model,
             this.since.elapsed().as_millis()
         );
@@ -143,6 +156,17 @@ impl Live {
             .map_err(|_| Error::Offline)
     }
     pub fn audio(&mut self, samples: &[f32]) -> Result<(), Error> {
+        if let Some((_, deadline)) = self.boundary_wait {
+            if Instant::now() >= deadline {
+                return Err(Error::Timeout);
+            }
+            // Keep onset and silence alike while the previous turn finalizes.
+            // Starting the next turn earlier caused real Google audio loss.
+            self.pending_audio.push_back(samples.to_vec());
+            return Ok(());
+        }
+        let speech = crate::pieces::is_speech(samples);
+        self.turn_needs_final |= speech;
         let pcm: Vec<u8> = samples
             .iter()
             .flat_map(|s| ((s.clamp(-1.0, 1.0) * 32767.0).round() as i16).to_le_bytes())
@@ -151,6 +175,18 @@ impl Live {
         self.send(json!({"realtimeInput":{"audio":{"mimeType":"audio/pcm;rate=16000","data":STANDARD.encode(pcm)}}}))?;
         self.frames += 1;
         self.samples += samples.len();
+        // Reuse the narrated model-free pause algorithm in pieces.rs. A long
+        // recording must not become one enormous unfinished server utterance.
+        // Every sample is sent exactly once before a boundary at a real pause.
+        if self.pause_cutter.push(samples, speech).is_some() {
+            self.send(json!({"realtimeInput":{"activityEnd":{}}}))?;
+            self.boundary_wait = Some((self.finals, Instant::now() + FINAL_TIMEOUT));
+            log::info!(
+                "gemini_live pause_boundary frames={} samples={}",
+                self.frames,
+                self.samples
+            );
+        }
         if self.frames == 1 || self.frames.is_multiple_of(100) {
             log::info!(
                 "gemini_live audio_out frames={} samples={} elapsed_ms={}",
@@ -229,6 +265,7 @@ impl Live {
         }
         if content["inputTranscription"]["text"].is_string() {
             self.finals += 1;
+            self.turn_needs_final = false;
             log::info!(
                 "gemini_live final_in count={} audio_frames={} elapsed_ms={}",
                 self.finals,
@@ -245,25 +282,52 @@ impl Live {
                 break;
             }
         }
+        if let Some((baseline, deadline)) = self.boundary_wait {
+            if self.finals > baseline && self.text.tentative.is_empty() {
+                self.boundary_wait = None;
+                self.send(json!({"realtimeInput":{"activityStart":{}}}))?;
+                while let Some(frame) = self.pending_audio.pop_front() {
+                    if Instant::now() >= deadline {
+                        return Err(Error::Timeout);
+                    }
+                    self.audio(&frame)?;
+                }
+                log::info!(
+                    "gemini_live resumed_after_final frames={} samples={}",
+                    self.frames,
+                    self.samples
+                );
+            } else if Instant::now() >= deadline {
+                return Err(Error::Timeout);
+            }
+        }
         Ok(())
     }
     pub fn finish(&mut self) -> Result<String, Error> {
-        self.text.complete = false;
-        self.send(json!({"realtimeInput":{"audioStreamEnd":true}}))?;
         let started = Instant::now();
+        self.text.complete = false;
+        let mut end_sent = self.boundary_wait.is_none();
+        if end_sent {
+            self.send(json!({"realtimeInput":{"activityEnd":{}}}))?;
+        }
         log::info!(
             "gemini_live audio_end frames={} samples={}",
             self.frames,
             self.samples
         );
         let until = started + FINAL_TIMEOUT;
-        let baseline = self.finals;
         let mut previous = self.finals;
         while Instant::now() < until {
             if let Err(e) = self.poll() {
                 // A server may close immediately after its authoritative final.
                 // There can be nothing more to drain once that socket closes.
-                if e == Error::Offline && self.finals > baseline && self.text.tentative.is_empty() {
+                if e == Error::Offline
+                    && self.finals > 0
+                    && self.text.tentative.is_empty()
+                    && self.boundary_wait.is_none()
+                    && self.pending_audio.is_empty()
+                    && !self.turn_needs_final
+                {
                     log::info!(
                         "gemini_live finalized_on_close release_ms={}",
                         started.elapsed().as_millis()
@@ -271,6 +335,10 @@ impl Live {
                     return Ok(self.text.committed.clone());
                 }
                 return Err(e);
+            }
+            if !end_sent && self.boundary_wait.is_none() {
+                self.send(json!({"realtimeInput":{"activityEnd":{}}}))?;
+                end_sent = true;
             }
             if self.finals != previous {
                 previous = self.finals;
@@ -286,7 +354,17 @@ impl Live {
             // peer ends the socket after authoritative final text.
             std::thread::sleep(Duration::from_millis(1));
         }
-        if (self.text.complete || self.finals > baseline) && self.text.tentative.is_empty() {
+        // Transcribe Live may finalize the last utterance before release and
+        // send neither another final nor turnComplete after the recording-end signal.
+        // After the full drain, retain authoritative text already received;
+        // never promote a pending interim or return before delayed finals.
+        if end_sent
+            && self.finals > 0
+            && self.text.tentative.is_empty()
+            && self.boundary_wait.is_none()
+            && self.pending_audio.is_empty()
+            && !self.turn_needs_final
+        {
             log::info!(
                 "gemini_live finalized_after_drain release_ms={} frames={} partials={} finals={}",
                 started.elapsed().as_millis(),
