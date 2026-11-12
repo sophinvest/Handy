@@ -51,6 +51,7 @@ export const SavedClips: React.FC<{ disabled: boolean; canRetry: boolean }> = ({
   const run = async (action: () => Promise<void>, success?: string) => {
     if (busy.current || disabled) return;
     busy.current = true;
+    const started = performance.now();
     setWorking(true);
     setMessage("");
     try {
@@ -65,6 +66,11 @@ export const SavedClips: React.FC<{ disabled: boolean; canRetry: boolean }> = ({
         setReady(false);
         setMessage(t("gemini.listError"));
       }
+      // Keep a completed fast copy/delete locked for the entire double-click
+      // gesture, so its second click cannot act on the next row or latest clip.
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.max(0, 500 - (performance.now() - started))),
+      );
       busy.current = false;
       setWorking(false);
     }

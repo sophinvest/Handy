@@ -162,3 +162,22 @@ test("main action resolves newest natively when the displayed list is stale", as
   );
   expect(call).toEqual({ command: "gemini_retry_clip", id: null });
 });
+
+test("a fast successful main action cannot drain a second clip on double click", async ({
+  page,
+}) => {
+  const button = page.getByRole("button", {
+    name: "Retry last failed clip",
+    exact: true,
+  });
+  await expect(button).toBeEnabled();
+  await button.dblclick({ force: true });
+  await expect(page.locator("li[data-clip-id]")).toHaveCount(2);
+  await expect(button).toBeEnabled();
+  expect(
+    await page.evaluate(
+      () =>
+        (window as unknown as { fixture: { calls: unknown[] } }).fixture.calls,
+    ),
+  ).toHaveLength(1);
+});
