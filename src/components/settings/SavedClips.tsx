@@ -69,9 +69,9 @@ export const SavedClips: React.FC<{ disabled: boolean; canRetry: boolean }> = ({
       setWorking(false);
     }
   };
-  const retry = (clip: SavedClip) =>
+  const retry = (clip: SavedClip | null) =>
     run(async () => {
-      await invoke("gemini_retry_clip", { clipId: clip.id });
+      await invoke("gemini_retry_clip", { clipId: clip?.id ?? null });
     }, t("gemini.delivered"));
   const metadata = (clip: SavedClip) =>
     t("gemini.clipTime", {
@@ -94,7 +94,7 @@ export const SavedClips: React.FC<{ disabled: boolean; canRetry: boolean }> = ({
         <button
           className="border border-line rounded px-3 py-2"
           disabled={locked || !latest || !canRetry}
-          onClick={() => latest && retry(latest)}
+          onClick={() => latest && retry(null)}
         >
           {t("gemini.retry")}
         </button>
@@ -127,7 +127,9 @@ export const SavedClips: React.FC<{ disabled: boolean; canRetry: boolean }> = ({
                 disabled={locked}
                 onClick={() =>
                   run(async () => {
-                    await invoke("gemini_delete_clip", { clipId: clip.id });
+                    await invoke("gemini_delete_clip", {
+                      clipId: clip?.id ?? null,
+                    });
                   }, t("gemini.deleted"))
                 }
               >

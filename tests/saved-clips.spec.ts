@@ -10,7 +10,7 @@ test.beforeEach(async ({ page }) => {
         saved_at_ms: 1794500000000 + n * 1000,
         duration_seconds: n / 10,
       })),
-      calls: [] as { command: string; id?: string }[],
+      calls: [] as { command: string; id?: string | null }[],
       fail: "",
       delay: 0,
       nextListDelay: 0,
@@ -24,7 +24,7 @@ test.beforeEach(async ({ page }) => {
           return id;
         },
         unregisterCallback: () => {},
-        invoke: async (command: string, args?: { clipId?: string }) => {
+        invoke: async (command: string, args?: { clipId?: string | null }) => {
           if (command === "plugin:event|listen") return 1;
           if (command === "plugin:event|unlisten") return;
           if (command === "gemini_list_clips") {
@@ -41,7 +41,9 @@ test.beforeEach(async ({ page }) => {
             command === "gemini_retry_clip" ||
             command === "gemini_delete_clip"
           )
-            state.clips = state.clips.filter((c) => c.id !== args?.clipId);
+            state.clips = state.clips.filter(
+              (c) => c.id !== (args?.clipId ?? state.clips[0]?.id),
+            );
           return "delivered";
         },
       },
@@ -82,7 +84,7 @@ test("newest action and metadata, with individual older retry and delete", async
   expect(calls).toEqual([
     { command: "gemini_retry_clip", id: "100.wav" },
     { command: "gemini_delete_clip", id: "200.wav" },
-    { command: "gemini_retry_clip", id: "300.wav" },
+    { command: "gemini_retry_clip", id: null },
   ]);
 });
 
@@ -131,4 +133,32 @@ test("a delayed refresh cannot restore a deleted row", async ({ page }) => {
   await page.waitForTimeout(600);
   await expect(rows).toHaveCount(2);
   await expect(page.locator('[data-clip-id="100.wav"]')).toHaveCount(0);
+});
+
+test("main action resolves newest natively when the displayed list is stale", async ({
+  page,
+}) => {
+  await expect(page.locator("li[data-clip-id]")).toHaveCount(3);
+  await page.evaluate(() => {
+    const state = (window as unknown as { fixture: { clips: object[] } })
+      .fixture;
+    state.clips.unshift({
+      id: "400.wav",
+      saved_at_ms: 1794500900000,
+      duration_seconds: 40,
+    });
+  });
+  await page
+    .getByRole("button", { name: "Retry last failed clip", exact: true })
+    .click();
+  await expect(page.locator('[data-clip-id="300.wav"]')).toHaveCount(1);
+  const call = await page.evaluate(
+    () =>
+      (
+        window as unknown as {
+          fixture: { calls: { command: string; id: string | null }[] };
+        }
+      ).fixture.calls[0],
+  );
+  expect(call).toEqual({ command: "gemini_retry_clip", id: null });
 });
