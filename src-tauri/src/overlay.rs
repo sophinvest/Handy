@@ -624,6 +624,7 @@ fn show_overlay_state_on_main(app_handle: &AppHandle, state: &str) {
             );
         }
 
+        handy_gemini::trace::log("overlay", || format!("show state={state}"));
         let _ = overlay_window.emit("show-overlay", state);
     }
 }
@@ -639,6 +640,7 @@ pub fn emit_recording_ready(app_handle: &AppHandle) {
     // Showing the overlay is also queued onto the main thread. Queue readiness
     // there as well so a very fast always-on stream cannot overtake show-overlay
     // and then get reset back to the arming state by the frontend.
+    handy_gemini::trace::log("mic", || "capture ready (first samples delivered)".into());
     let handle = app_handle.clone();
     let _ = app_handle.run_on_main_thread(move || {
         let _ = handle.emit_to("recording_overlay", "recording-ready", ());
@@ -783,6 +785,7 @@ pub fn hide_recording_overlay(app_handle: &AppHandle) {
         // after this point invalidates the delayed hide below.
         let scheduled_at = OVERLAY_SHOW_GENERATION.load(Ordering::SeqCst);
         // Emit event to trigger fade-out animation
+        handy_gemini::trace::log("overlay", || "hide".into());
         let _ = overlay_window.emit("hide-overlay", ());
         // Hide the window after a short delay to allow animation to complete,
         // unless a newer session has shown the overlay again by then.

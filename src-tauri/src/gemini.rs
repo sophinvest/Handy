@@ -555,3 +555,96 @@ pub fn gemini_delete_clip(app: AppHandle, clip_id: String) -> Result<(), String>
     let _ = app.emit("gemini-clips-changed", ());
     Ok(())
 }
+
+// ---- Detailed Google log (SOP-10811) ------------------------------------------
+// Off by default. The switch is a flag file in the app data folder so it survives
+// restarts without touching the settings schema; trace lines live in the log folder.
+#[derive(Serialize, specta::Type)]
+pub struct TraceStatus {
+    enabled: bool,
+    folder: String,
+    file: String,
+}
+fn trace_flag(app: &AppHandle) -> Result<PathBuf, String> {
+    crate::portable::app_data_dir(app)
+        .map(|d| d.join("google-trace-enabled"))
+        .map_err(|_| "Cannot locate the app data folder".to_string())
+}
+fn trace_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    crate::portable::app_log_dir(app).map_err(|_| "Cannot locate the log folder".to_string())
+}
+fn trace_status(app: &AppHandle) -> Result<TraceStatus, String> {
+    let dir = trace_dir(app)?;
+    let file = dir.join(handy_gemini::trace::file_name(
+        &chrono::Local::now().format("%Y-%m-%d").to_string(),
+    ));
+    Ok(TraceStatus {
+        enabled: handy_gemini::trace::enabled(),
+        folder: dir.display().to_string(),
+        file: file.display().to_string(),
+    })
+}
+/// Called once at startup: resume tracing if the user left it on.
+pub fn trace_init(app: &AppHandle) {
+    let on = trace_flag(app).map(|f| f.exists()).unwrap_or(false);
+    if on {
+        if let Ok(dir) = trace_dir(app) {
+            let _ = handy_gemini::trace::enable(&dir);
+            handy_gemini::trace::log("trace", || {
+                format!("Handy {} started", app.package_info().version)
+            });
+        }
+    }
+}
+#[tauri::command]
+#[specta::specta]
+pub fn gemini_trace_status(app: AppHandle) -> Result<TraceStatus, String> {
+    trace_status(&app)
+}
+#[tauri::command]
+#[specta::specta]
+pub fn gemini_trace_set(app: AppHandle, enabled: bool) -> Result<TraceStatus, String> {
+    let flag = trace_flag(&app)?;
+    if enabled {
+        handy_gemini::trace::enable(&trace_dir(&app)?)
+            .map_err(|_| "Cannot create the log folder".to_string())?;
+        fs::write(&flag, b"on").map_err(|_| "Cannot save the log setting".to_string())?;
+        handy_gemini::trace::log("trace", || {
+            format!("Handy {} detailed log on", app.package_info().version)
+        });
+    } else {
+        handy_gemini::trace::disable();
+        let _ = fs::remove_file(&flag);
+    }
+    trace_status(&app)
+}
+/// Last part of today's trace, for the Copy debug log button.
+#[tauri::command]
+#[specta::specta]
+pub fn gemini_trace_copy(_app: AppHandle) -> Result<String, String> {
+    let text = handy_gemini::trace::tail(2 * 1024 * 1024);
+    if text.is_empty() {
+        Err("Nothing logged today. Turn the detailed log on, dictate, then copy it".into())
+    } else {
+        Ok(text)
+    }
+}
+/// The overlay window reports what it shows (label, dot colour, error text).
+#[tauri::command]
+#[specta::specta]
+pub fn gemini_trace_event(tag: String, message: String) {
+    handy_gemini::trace::log(
+        &format!("ui:{}", tag.chars().take(24).collect::<String>()),
+        || message.chars().take(1000).collect(),
+    );
+}
+#[tauri::command]
+#[specta::specta]
+pub fn gemini_trace_open(app: AppHandle) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let dir = trace_dir(&app)?;
+    fs::create_dir_all(&dir).map_err(|_| "Cannot create the log folder".to_string())?;
+    app.opener()
+        .open_path(dir.to_string_lossy(), None::<String>)
+        .map_err(|_| "Cannot open the log folder".to_string())
+}

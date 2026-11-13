@@ -1049,7 +1049,7 @@
     "engine": {
       "local": "Local model",
       "google_connecting": "Google: connecting",
-      "google_live": "● Google live",
+      "google_live": "Google live",
       "google_pieces": "Google: pause pieces",
       "google_polishing": "Post-processing…",
       "google_uploading": "Google: uploading",
@@ -1076,6 +1076,15 @@
     },
     "copyDiagnostics": "Copy diagnostics",
     "diagnosticsCopied": "Recent Google failure lines copied. Paste them into a message.",
-    "openLogFolder": "Open log folder"
+    "openLogFolder": "Open log folder",
+    "trace": {
+      "toggle": "Detailed Google log",
+      "hint": "Writes a timestamped trace of everything the Google path does: key presses, microphone, connection events, every message and timer, turns, engine switches, what the overlay shows, retries and paste. It includes your dictated text. It never includes audio or your key. Off by default; files older than 7 days are deleted.",
+      "file": "Writing to {{file}}",
+      "copy": "Copy debug log",
+      "open": "Open log folder",
+      "copied": "Debug log copied to the clipboard.",
+      "copyFailed": "Could not copy. Open the log folder instead."
+    }
   }
 }

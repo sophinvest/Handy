@@ -18,6 +18,22 @@ use std::{cell::RefCell, time::Duration};
 /// Transient failures get this many retries after the first attempt.
 pub const TRANSIENT_RETRIES: u32 = 2;
 pub const BACKOFF: [Duration; 2] = [Duration::from_millis(400), Duration::from_millis(1200)];
+/// A Live session that drops mid-dictation is reconnected for about a minute before
+/// anyone gives up on Live (SOP-10811): waits between those attempts.
+pub const LIVE_BACKOFF: [Duration; 12] = [
+    Duration::from_millis(400),
+    Duration::from_millis(1200),
+    Duration::from_millis(2500),
+    Duration::from_secs(5),
+    Duration::from_secs(8),
+    Duration::from_secs(8),
+    Duration::from_secs(8),
+    Duration::from_secs(8),
+    Duration::from_secs(8),
+    Duration::from_secs(8),
+    Duration::from_secs(8),
+    Duration::from_secs(8),
+];
 /// Longest quota wait worth holding a dictation for.
 pub const QUOTA_MAX_WAIT: Duration = Duration::from_secs(45);
 const QUOTA_MARGIN: Duration = Duration::from_secs(1);
@@ -38,6 +54,12 @@ thread_local! {
     static LAST: RefCell<Detail> = RefCell::new(Detail::default());
 }
 pub fn note(detail: Detail) {
+    crate::trace::log("failure", || {
+        format!(
+            "http={:?} ws_close={:?} status={:?} message={:?} retry_after={:?}",
+            detail.http, detail.ws_close, detail.status, detail.message, detail.retry_after
+        )
+    });
     LAST.with(|l| *l.borrow_mut() = detail);
 }
 pub fn last() -> Detail {
@@ -155,8 +177,24 @@ pub fn retryable(error: &Error) -> bool {
 pub struct RetryState {
     transient: u32,
     quota: bool,
+    /// Transient retries allowed; 0 means the default `TRANSIENT_RETRIES`.
+    limit: u32,
 }
 impl RetryState {
+    /// The long reconnect policy for a dropped Live session (`LIVE_BACKOFF`).
+    pub fn persistent() -> Self {
+        Self {
+            limit: LIVE_BACKOFF.len() as u32,
+            ..Self::default()
+        }
+    }
+    fn limit(&self) -> u32 {
+        if self.limit == 0 {
+            TRANSIENT_RETRIES
+        } else {
+            self.limit
+        }
+    }
     /// Wait before the next attempt, or `None` to give up now.
     pub fn next(&mut self, error: &Error, detail: &Detail) -> Option<Duration> {
         if *error == Error::Quota {
@@ -170,10 +208,14 @@ impl RetryState {
             self.quota = true;
             return Some(wait);
         }
-        if !retryable(error) || self.transient >= TRANSIENT_RETRIES {
+        if !retryable(error) || self.transient >= self.limit() {
             return None;
         }
-        let wait = BACKOFF[self.transient as usize];
+        let wait = if self.limit == 0 {
+            BACKOFF[self.transient as usize]
+        } else {
+            LIVE_BACKOFF[self.transient as usize]
+        };
         self.transient += 1;
         Some(wait)
     }
@@ -182,7 +224,7 @@ impl RetryState {
         1 + self.transient + self.quota as u32
     }
     pub fn max_attempts(&self) -> u32 {
-        1 + TRANSIENT_RETRIES + self.quota as u32
+        1 + self.limit() + self.quota as u32
     }
 }
 

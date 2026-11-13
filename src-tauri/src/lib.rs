@@ -784,6 +784,11 @@ pub fn run(cli_args: CliArgs) {
             gemini::gemini_delete_clip,
             gemini::gemini_open_clips,
             gemini::gemini_diagnostics,
+            gemini::gemini_trace_status,
+            gemini::gemini_trace_set,
+            gemini::gemini_trace_copy,
+            gemini::gemini_trace_event,
+            gemini::gemini_trace_open,
             commands::models::download_language_detector,
             commands::models::is_language_detector_downloaded,
             commands::models::delete_model,
@@ -959,6 +964,7 @@ pub fn run(cli_args: CliArgs) {
         .manage(cli_args.clone())
         .manage(notices::NoticeStore::default())
         .setup(move |app| {
+            gemini::trace_init(app.handle());
             #[cfg(target_os = "windows")]
             log::info!(
                 "Vulkan layer policy: VK_LOADER_LAYERS_DISABLE={:?}, HANDY_KEEP_VULKAN_IMPLICIT_LAYERS={}",

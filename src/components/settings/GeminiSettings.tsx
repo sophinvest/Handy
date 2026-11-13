@@ -6,6 +6,7 @@ import { commands } from "@/bindings";
 import { useModelStore } from "@/stores/modelStore";
 import { ShortcutInput } from "./ShortcutInput";
 import { SavedClips } from "./SavedClips";
+import { GeminiTraceLog } from "./GeminiTraceLog";
 import { SettingsGroup } from "../ui/SettingsGroup";
 
 export const GEMINI_ENGINE = "google-gemini-cloud";
@@ -235,6 +236,7 @@ export const GeminiSettings: React.FC<{
           disabled={locked}
           canRetry={currentModel === GEMINI_ENGINE}
         />
+        <GeminiTraceLog disabled={disabled} />
         <p role="status" className="text-sm whitespace-pre-wrap">
           {working ? t("gemini.working") : message}
         </p>

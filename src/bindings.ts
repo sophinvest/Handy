@@ -775,6 +775,31 @@ async geminiDiagnostics() : Promise<Result<string, string>> {
     try { return { status: "ok", data: await TAURI_INVOKE("gemini_diagnostics") }; }
     catch (e) { if(e instanceof Error) throw e; else return { status: "error", error: e as any }; }
 },
+async geminiTraceStatus() : Promise<Result<TraceStatus, string>> {
+    try { return { status: "ok", data: await TAURI_INVOKE("gemini_trace_status") }; }
+    catch (e) { if(e instanceof Error) throw e; else return { status: "error", error: e as any }; }
+},
+async geminiTraceSet(enabled: boolean) : Promise<Result<TraceStatus, string>> {
+    try { return { status: "ok", data: await TAURI_INVOKE("gemini_trace_set", { enabled }) }; }
+    catch (e) { if(e instanceof Error) throw e; else return { status: "error", error: e as any }; }
+},
+/**
+ * Last part of today's trace, for the Copy debug log button.
+ */
+async geminiTraceCopy() : Promise<Result<string, string>> {
+    try { return { status: "ok", data: await TAURI_INVOKE("gemini_trace_copy") }; }
+    catch (e) { if(e instanceof Error) throw e; else return { status: "error", error: e as any }; }
+},
+/**
+ * The overlay window reports what it shows (label, dot colour, error text).
+ */
+async geminiTraceEvent(tag: string, message: string) : Promise<void> {
+    await TAURI_INVOKE("gemini_trace_event", { tag, message });
+},
+async geminiTraceOpen() : Promise<Result<null, string>> {
+    try { return { status: "ok", data: await TAURI_INVOKE("gemini_trace_open") }; }
+    catch (e) { if(e instanceof Error) throw e; else return { status: "error", error: e as any }; }
+},
 async geminiOpenClips() : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("gemini_open_clips") };
@@ -1544,6 +1569,7 @@ export type ShortcutActivation =
 "hold_or_toggle"
 export type ShortcutBinding = { id: string; name: string; description: string; default_binding: string; current_binding: string }
 export type SoundTheme = "marimba" | "pop" | "custom"
+export type TraceStatus = { enabled: boolean; folder: string; file: string }
 export type Status = { configured: boolean; credential_storage: string; model: string | null; live_model: string | null; mode: string; chunk_seconds: number; rpm: number | null; rpd: number | null; requests_today: number; fallback: boolean; fallback_model: string; pending: number }
 /**
  * Phase of the streaming overlay card, emitted to drive its UI state.

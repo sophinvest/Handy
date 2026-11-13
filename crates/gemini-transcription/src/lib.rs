@@ -4,6 +4,7 @@ pub mod live;
 pub mod pieces;
 pub mod resilience;
 pub mod secure_file;
+pub mod trace;
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use reqwest::blocking::Client;

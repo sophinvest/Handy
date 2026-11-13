@@ -45,13 +45,34 @@ const engineLabel = (t: TFunction, engine: string) => {
   return t(`gemini.engine.${engine}`);
 };
 
-// Status-light colour for the dot: green = connected to Google live, amber =
-// connecting / retrying / fallback / uploading, red = error (SOP-10793).
+// Status-light colour for the dot in front of the word "Google": green =
+// connected to Google live, amber = connecting / retrying / fallback / uploading,
+// red = error (SOP-10793, moved from the far-left dot by SOP-10811).
 const engineStatus = (engine: string) => {
   if (engine === "google_live") return "ok";
   if (engine === "google_error") return "error";
   if (engine.startsWith("google_")) return "busy";
   return "";
+};
+
+const DOT_COLOUR: Record<string, string> = {
+  ok: "green",
+  busy: "amber",
+  error: "red",
+};
+
+// The engine name with its status dot right in front of the word "Google". Other
+// engines (the local model, post-processing) have no dot.
+const engineText = (t: TFunction, engine: string) => {
+  const status = engineStatus(engine);
+  const label = engineLabel(t, engine);
+  if (!status || engine === "google_polishing") return label;
+  return (
+    <>
+      <i className="sstat" data-status={status} aria-hidden="true" />
+      {label}
+    </>
+  );
 };
 
 const isNoticeState = (state: OverlayState) =>
@@ -99,6 +120,16 @@ const RecordingOverlay: React.FC = () => {
   });
   const [engine, setEngine] = useState("local");
   const engineUpdated = useRef(false);
+  // Detailed Google log: what the box shows, its label and the dot colour. The
+  // backend drops the line unless the log is on.
+  useEffect(() => {
+    if (!engine.startsWith("google_")) return;
+    const dot = DOT_COLOUR[engineStatus(engine)] ?? "none";
+    void commands.geminiTraceEvent(
+      "overlay_label",
+      `engine=${engine} label="${engineLabel(t, engine)}" dot=${dot}`,
+    );
+  }, [engine, t]);
   const [phase, setPhase] = useState<StreamPhase>("listening");
   const [workKind, setWorkKind] = useState<StreamWorkKind>("transcribing");
   const [elapsed, setElapsed] = useState(0);
@@ -302,6 +333,23 @@ const RecordingOverlay: React.FC = () => {
   const noticeTitle = shownNotice
     ? t(noticeDisplay(shownNotice.code).title)
     : "";
+  // The compact pill has no text area, so it carries the real error after the title
+  // (e.g. "Transcription Failed: Google: no transcript for 20 s ...") (SOP-10811).
+  const noticeLabel =
+    shownNotice &&
+    state === "notice" &&
+    shownNotice.detail &&
+    !noticeDisplay(shownNotice.code).explanation
+      ? `${noticeTitle}: ${shownNotice.detail}`
+      : noticeTitle;
+  // Report what the box shows to the detailed Google log (dropped when it is off).
+  useEffect(() => {
+    if (!shownNotice) return;
+    void commands.geminiTraceEvent(
+      "overlay_notice",
+      `state=${state} code=${shownNotice.code} title="${noticeTitle}" detail="${shownNotice.detail ?? ""}"`,
+    );
+  }, [shownNotice, state, noticeTitle]);
 
   // CSS can't animate to an intrinsic width, so a notice pill gets a measured one.
   useLayoutEffect(() => {
@@ -310,7 +358,7 @@ const RecordingOverlay: React.FC = () => {
     setNoticeWidth(
       Math.ceil(probe.getBoundingClientRect().width) + NOTICE_PILL_CHROME,
     );
-  }, [noticeTitle, isVisible]);
+  }, [noticeLabel, isVisible]);
 
   if (!isVisible && !shownNotice) return null;
 
@@ -363,12 +411,7 @@ const RecordingOverlay: React.FC = () => {
   // pill & panel, so the Live morph is a pure width change.
   const listeningRow = (showTimer: boolean, showCancel: boolean) => (
     <div className="sbase">
-      <div className="sbase-l">
-        <span
-          className={`sdot ${captureReady ? "ready" : "arming"}`}
-          data-status={engineStatus(engine)}
-        />
-      </div>
+      <div className="sbase-l" />
       {engine === "local" ? (
         <span className="sengine" data-engine={engine}>
           {t("gemini.engine.local")}
@@ -376,7 +419,7 @@ const RecordingOverlay: React.FC = () => {
         </span>
       ) : (
         <span className="sengine" data-engine={engine}>
-          {engineLabel(t, engine)}
+          {engineText(t, engine)}
         </span>
       )}
       <div className="sbase-r">
@@ -397,7 +440,7 @@ const RecordingOverlay: React.FC = () => {
         {workKind === "polishing" && engine.startsWith("google_")
           ? t("gemini.engine.google_polishing")
           : engine.startsWith("google_")
-            ? engineLabel(t, engine)
+            ? engineText(t, engine)
             : label}
       </span>
       <div className="sbase-r">{showCancel && cancelBtn}</div>
@@ -407,12 +450,12 @@ const RecordingOverlay: React.FC = () => {
   const noticeRow = (
     <div className="sbase snotice">
       <NoticeBadgeIcon className="nglyph" />
-      <span className="nlabel">{noticeTitle}</span>
+      <span className="nlabel">{noticeLabel}</span>
     </div>
   );
   const noticeProbe = shownNotice && (
     <span ref={noticeProbeRef} className="nlabel nprobe" aria-hidden="true">
-      {noticeTitle}
+      {noticeLabel}
     </span>
   );
   const noticeClass = shownNotice ? `cnotice level-${shownNotice.level}` : "";
@@ -427,10 +470,10 @@ const RecordingOverlay: React.FC = () => {
       streamText.committed.length > 0 || streamText.tentative.length > 0;
     const working = !liveNotice && phase === "working";
     // A notice keeps the transcript; with none, the panel explains the notice.
-    const noticeText =
-      liveNotice && !hasText
-        ? (noticeDisplay(liveNotice.code).explanation?.(t) ?? liveNotice.detail)
-        : null;
+    // The real error shows with the transcript too, not only when the box is empty.
+    const noticeText = liveNotice
+      ? (noticeDisplay(liveNotice.code).explanation?.(t) ?? liveNotice.detail)
+      : null;
     // While listening, a slow model load opens the panel with a notice where the
     // text would be, so speech that isn't transcribing yet doesn't look ignored.
     const loadingNotice = !liveNotice && modelLoadSlow && !working && !hasText;
@@ -467,11 +510,11 @@ const RecordingOverlay: React.FC = () => {
                       {t("overlay.loadingModel")}
                     </span>
                   )}
-                  {noticeText && <span className="ndetail">{noticeText}</span>}
                   <span className="committed">
                     {streamText.committed ? streamText.committed + " " : ""}
                   </span>
                   <span className="tentative">{streamText.tentative}</span>
+                  {noticeText && <span className="ndetail">{noticeText}</span>}
                   {/* Drop the blinking caret once finalizing — it's no longer
                       capturing, and a static spinner conveys the work. */}
                   {!working && !loadingNotice && !liveNotice && (

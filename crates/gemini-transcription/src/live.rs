@@ -1,8 +1,10 @@
-// ALGORITHM VERSION 1.4 — 2026-11-13 (Live turn cadence; pause/energy rules live in pieces.rs)
+// ALGORITHM VERSION 1.5 — 2026-11-13 (Live turn cadence; pause/energy rules live in pieces.rs)
 // 1. Recording owns the Google turn (manual activity); send every sample exactly once.
 // 2. After at least 3 s of turn audio and 1.5 s of detected quiet, send activityEnd.
-// 3. Queue all audio (speech and silence) until Google's final arrives, then activityStart
-//    and flush in order; bounded to 1.5 s, release shares that deadline.
+// 3. Queue all audio (speech and silence) until Google answers the turn, then activityStart
+//    and flush in order. "Answers" means ONE of: a final transcript; or Google's
+//    voiceActivity ACTIVITY_END followed by 3 s with no transcript (Google heard no speech:
+//    an empty turn, not an error). Release shares the same rules.
 // 4. Finals therefore arrive phrase by phrase and only the current phrase stays provisional.
 // v1.0 — SOP-10742: 30 s minimum / 0.4 s quiet (whole 30 s stayed underlined).
 // v1.1 — SOP-10774: 3 s minimum / 0.7 s quiet for Live; pieces mode keeps 30/60/90 s.
@@ -12,9 +14,17 @@
 //    dropped or repeated). Failure classes and retries live in resilience.rs.
 // v1.2 — SOP-10790: resume point, specific failure classes, connect/close detail.
 // 6. A turn that held no detected speech is never ended: Google sends no final for it, so
-//    the 1.5 s wait would time out and Live would drop on any pause over ~3 s.
+//    waiting would time out and Live would drop on any pause over ~3 s.
 // v1.3 — SOP-10793: silence-only turns stay open; fallback keeps the overlay text.
 // v1.4 — SOP-10793: quiet needed to end a phrase raised 0.7 s -> 1.5 s (mid-sentence thinking pauses).
+// 7. Waiting for Google is never a fixed short timer. The wait fails only if Google sends
+//    nothing at all for 20 s (any message, partial or not, restarts that clock) or the wait
+//    passes 60 s. Sends may block up to 5 s. A slow reply with the socket alive is not a failure.
+// 8. Release returns when the last spoken turn has its final and Google reports the
+//    generation complete (0.7 s quiet) or stays quiet for 1.5 s; a spoken turn Google
+//    closed without any transcript for 3 s counts as empty, so release never fails on it.
+// v1.5 — SOP-10811: the 1.5 s final wait (and 0.3 s send limit) removed; Google's empty
+//    turns no longer count as timeouts; release settles on generationComplete.
 //! Dedicated Transcribe Live socket, with bounded network waits and no key in
 //! the URL or errors. It never pastes or owns the microphone.
 use crate::{resilience, Error, TIMEOUT};
@@ -37,7 +47,26 @@ pub const LIVE_MIN_TURN_MS: u32 = 3000;
 pub const LIVE_QUIET_MS: u32 = 1500;
 #[cfg(test)]
 pub const LIVE_QUIET_MS: u32 = 700;
-const FINAL_TIMEOUT: Duration = Duration::from_millis(1500);
+/// A final transcript is overdue only when Google has been silent this long. Any
+/// server message (partial, final, turnComplete) restarts the clock (SOP-10811).
+pub const FINAL_IDLE: Duration = Duration::from_secs(20);
+/// Hard ceiling for one wait even while messages keep arriving.
+pub const FINAL_CEILING: Duration = Duration::from_secs(60);
+/// After the last turn's final, how long the socket must stay quiet before release
+/// returns without a turnComplete.
+const SETTLE_QUIET: Duration = Duration::from_millis(1500);
+/// Quiet needed after `generationComplete`/`turnComplete` before release returns.
+const SETTLE_AFTER_DONE: Duration = Duration::from_millis(700);
+/// Google answers our activityEnd with `voiceActivity ACTIVITY_END`. If a turn we
+/// thought was speech gets no transcript this long after that, Google heard none:
+/// the turn is empty, not a failure (measured on Jean's recordings, SOP-10811).
+#[cfg(not(test))]
+const EMPTY_TURN_GRACE: Duration = Duration::from_secs(3);
+#[cfg(test)]
+const EMPTY_TURN_GRACE: Duration = Duration::from_millis(300);
+/// Longest a single send may block. It was 300 ms, which a brief network stall turned
+/// into a "timed out" failure although the connection was fine (SOP-10811).
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Pause between replayed 32 ms frames when resuming a session.
 const REPLAY_PACE: Duration = Duration::from_millis(4);
 pub fn valid_model(name: &str) -> bool {
@@ -109,9 +138,9 @@ fn server_error(v: &Value) -> Error {
     resilience::note(detail);
     error
 }
-fn socket_failure(e: tungstenite::Error) -> Error {
+fn socket_failure(e: tungstenite::Error, op: &str) -> Error {
     match e {
-        tungstenite::Error::Io(e) => io_failure("socket error", &e),
+        tungstenite::Error::Io(e) => io_failure(&format!("socket {op}"), &e),
         tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed => {
             resilience::note(resilience::Detail {
                 ws_close: Some(1006),
@@ -123,9 +152,15 @@ fn socket_failure(e: tungstenite::Error) -> Error {
         _ => offline("websocket protocol error"),
     }
 }
-fn final_timeout() -> Error {
+fn final_timeout(waited: Duration, idle: Duration) -> Error {
+    let message = format!(
+        "no transcript from Google for {:.1} s after the phrase ended (silent for {:.1} s)",
+        waited.as_secs_f32(),
+        idle.as_secs_f32()
+    );
+    crate::trace::log("timer", || format!("final_wait FIRED {message}"));
     resilience::note(resilience::Detail {
-        message: Some("no final transcript within 1.5 s".into()),
+        message: Some(message),
         ..Default::default()
     });
     Error::Timeout
@@ -174,7 +209,16 @@ pub struct Live {
     partials: usize,
     finals: usize,
     pause_cutter: crate::pieces::Cutter,
+    /// (finals before activityEnd, when it was sent, samples it covers)
     boundary_wait: Option<(usize, Instant, usize)>,
+    last_message: Instant,
+    activity_end_at: Option<Instant>,
+    /// When Google's `voiceActivity ACTIVITY_END` answered our activityEnd.
+    end_acked: Option<Instant>,
+    /// `generationComplete` seen since our activityEnd.
+    generation_done: bool,
+    final_idle: Duration,
+    final_ceiling: Duration,
     safe_samples: usize,
     safe_text: usize,
     turn_needs_final: bool,
@@ -186,6 +230,7 @@ impl Live {
             return Err(Error::ModelMissing);
         }
         resilience::clear();
+        crate::trace::log("ws", || format!("connect start model={model}"));
         let addr = (HOST, 443)
             .to_socket_addrs()
             .map_err(|e| io_failure("dns lookup failed", &e))?
@@ -226,6 +271,12 @@ impl Live {
             finals: 0,
             pause_cutter: crate::pieces::Cutter::with_millis(LIVE_MIN_TURN_MS, LIVE_QUIET_MS),
             boundary_wait: None,
+            last_message: Instant::now(),
+            activity_end_at: None,
+            end_acked: None,
+            generation_done: false,
+            final_idle: FINAL_IDLE,
+            final_ceiling: FINAL_CEILING,
             safe_samples: 0,
             safe_text: 0,
             turn_needs_final: false,
@@ -252,13 +303,13 @@ impl Live {
         }
         match this.socket.get_mut() {
             MaybeTlsStream::Plain(t) => {
-                t.set_write_timeout(Some(Duration::from_millis(300)))
+                t.set_write_timeout(Some(WRITE_TIMEOUT))
                     .map_err(|_| Error::Offline)?;
                 t.set_read_timeout(Some(Duration::from_millis(2)))
             }
             MaybeTlsStream::Rustls(t) => {
                 t.sock
-                    .set_write_timeout(Some(Duration::from_millis(300)))
+                    .set_write_timeout(Some(WRITE_TIMEOUT))
                     .map_err(|_| Error::Offline)?;
                 t.sock.set_read_timeout(Some(Duration::from_millis(2)))
             }
@@ -268,6 +319,12 @@ impl Live {
         // Recording, not Google's pause detector, owns this push-to-talk turn.
         // Automatic endpointing truncated the public speech fixture mid-sentence.
         this.send(json!({"realtimeInput":{"activityStart":{}}}))?;
+        crate::trace::log("ws", || {
+            format!(
+                "setup complete, activityStart sent connect_ms={}",
+                this.since.elapsed().as_millis()
+            )
+        });
         log::info!(
             "gemini_live setup_complete remote_manual_activity=true model={} connect_ms={}",
             model,
@@ -275,15 +332,30 @@ impl Live {
         );
         Ok(this)
     }
+    /// Tell Google the current turn is over and start timing its answer.
+    fn send_end(&mut self, why: &str) -> Result<(), Error> {
+        self.send(json!({"realtimeInput":{"activityEnd":{}}}))?;
+        self.activity_end_at = Some(Instant::now());
+        self.end_acked = None;
+        self.generation_done = false;
+        self.text.complete = false;
+        crate::trace::log("turn", || {
+            format!(
+                "end sent ({why}) frames={} samples={}",
+                self.frames, self.samples
+            )
+        });
+        Ok(())
+    }
     fn send(&mut self, value: Value) -> Result<(), Error> {
         self.socket
             .send(Message::Text(value.to_string().into()))
-            .map_err(socket_failure)
+            .map_err(|e| socket_failure(e, "send"))
     }
     pub fn audio(&mut self, samples: &[f32]) -> Result<(), Error> {
-        if let Some((_, deadline, _)) = self.boundary_wait {
-            if Instant::now() >= deadline {
-                return Err(final_timeout());
+        if let Some((_, started, _)) = self.boundary_wait {
+            if let Some(e) = self.final_overdue(started) {
+                return Err(e);
             }
             // Keep onset and silence alike while the previous turn finalizes.
             // Starting the next turn earlier caused real Google audio loss.
@@ -306,13 +378,24 @@ impl Live {
         // A silence-only turn has nothing to finalize: Google sends no final for it,
         // so ending it would time out and drop Live (SOP-10793). Keep it open.
         if self.pause_cutter.push(samples, speech).is_some() && self.turn_needs_final {
-            self.send(json!({"realtimeInput":{"activityEnd":{}}}))?;
-            self.boundary_wait = Some((self.finals, Instant::now() + FINAL_TIMEOUT, self.samples));
+            self.send_end("pause boundary")?;
+            self.boundary_wait = Some((self.finals, Instant::now(), self.samples));
             log::info!(
                 "gemini_live pause_boundary frames={} samples={}",
                 self.frames,
                 self.samples
             );
+        }
+        if self.frames == 1 || self.frames.is_multiple_of(50) {
+            crate::trace::log("ws_out", || {
+                format!(
+                    "audio frames={} samples={} bytes_this_frame={} t_ms={}",
+                    self.frames,
+                    self.samples,
+                    samples.len() * 2,
+                    self.since.elapsed().as_millis()
+                )
+            });
         }
         if self.frames == 1 || self.frames.is_multiple_of(100) {
             log::info!(
@@ -332,6 +415,7 @@ impl Live {
                     return Err(server_error(&v));
                 }
                 self.go_away |= v.get("goAway").is_some();
+                self.trace_in(&v, t.len());
                 self.accept(&v);
                 Ok(Some(v))
             }
@@ -341,12 +425,20 @@ impl Live {
                     return Err(server_error(&v));
                 }
                 self.go_away |= v.get("goAway").is_some();
+                self.trace_in(&v, t.len());
                 self.accept(&v);
                 Ok(Some(v))
             }
             Ok(Message::Close(frame)) => {
                 let code = frame.as_ref().map(|f| u16::from(f.code)).unwrap_or(1005);
                 let reason = frame.map(|f| f.reason.to_string()).unwrap_or_default();
+                crate::trace::log("ws_close", || {
+                    format!(
+                        "code={code} reason={:?} t_ms={}",
+                        reason,
+                        self.since.elapsed().as_millis()
+                    )
+                });
                 log::warn!("gemini_live socket_closed code={}", code);
                 let error = resilience::classify_close(code, &reason);
                 resilience::note(resilience::Detail {
@@ -365,11 +457,42 @@ impl Live {
             {
                 Ok(None)
             }
-            Err(e) => Err(socket_failure(e)),
+            Err(e) => Err(socket_failure(e, "read")),
         }
+    }
+    /// Detailed-log line for one server message: kinds, size, timing; transcript text only.
+    fn trace_in(&mut self, v: &Value, size: usize) {
+        self.last_message = Instant::now();
+        crate::trace::log("ws_in", || {
+            let c = &v["serverContent"];
+            let mut kinds: Vec<String> = v
+                .as_object()
+                .map(|o| o.keys().cloned().collect())
+                .unwrap_or_default();
+            if let Some(o) = c.as_object() {
+                kinds.extend(o.keys().map(|k| format!("serverContent.{k}")));
+            }
+            let text = |k: &str| c[k]["text"].as_str().map(|t| format!(" {k}=\"{t}\""));
+            format!(
+                "bytes={size} kinds={} t_ms={} since_end_ms={}{}{}",
+                kinds.join(","),
+                self.since.elapsed().as_millis(),
+                self.activity_end_at
+                    .map(|t| t.elapsed().as_millis().to_string())
+                    .unwrap_or_else(|| "-".into()),
+                text("interimInputTranscription").unwrap_or_default(),
+                text("inputTranscription").unwrap_or_default(),
+            )
+        });
     }
     fn accept(&mut self, v: &Value) {
         let content = &v["serverContent"];
+        if v["voiceActivity"]["type"] == "ACTIVITY_END" && self.activity_end_at.is_some() {
+            self.end_acked = Some(Instant::now());
+        }
+        if content["generationComplete"] == true {
+            self.generation_done = true;
+        }
         if content["interimInputTranscription"]["text"].is_string() {
             self.partials += 1;
             log::info!(
@@ -398,17 +521,40 @@ impl Live {
                 break;
             }
         }
-        if let Some((baseline, deadline, cut)) = self.boundary_wait {
-            if self.finals > baseline && self.text.tentative.is_empty() {
+        if let Some((baseline, started, cut)) = self.boundary_wait {
+            let final_in = self.finals > baseline && self.text.tentative.is_empty();
+            let empty = self.finals == baseline
+                && self.text.tentative.is_empty()
+                && self
+                    .end_acked
+                    .is_some_and(|t| t.elapsed() >= EMPTY_TURN_GRACE);
+            if final_in || empty {
                 self.boundary_wait = None;
+                if empty {
+                    self.turn_needs_final = false;
+                    log::info!(
+                        "gemini_live empty_turn samples={} (no transcript after ACTIVITY_END)",
+                        cut
+                    );
+                }
+                crate::trace::log("turn", || {
+                    format!(
+                        "{} after {} ms; next turn starts",
+                        if empty {
+                            "Google heard no speech (ACTIVITY_END, no transcript)"
+                        } else {
+                            "final received"
+                        },
+                        started.elapsed().as_millis()
+                    )
+                });
                 // Everything up to this cut now has authoritative text.
                 self.safe_samples = cut;
                 self.safe_text = self.text.committed.len();
                 self.send(json!({"realtimeInput":{"activityStart":{}}}))?;
+                self.activity_end_at = None;
+                crate::trace::log("turn", || "start sent (next turn)".into());
                 while let Some(frame) = self.pending_audio.pop_front() {
-                    if Instant::now() >= deadline {
-                        return Err(final_timeout());
-                    }
                     self.audio(&frame)?;
                 }
                 log::info!(
@@ -416,11 +562,23 @@ impl Live {
                     self.frames,
                     self.samples
                 );
-            } else if Instant::now() >= deadline {
-                return Err(final_timeout());
+            } else if let Some(e) = self.final_overdue(started) {
+                return Err(e);
             }
         }
         Ok(())
+    }
+    /// Some(error) when Google has gone quiet for `final_idle` or the wait passed the ceiling.
+    fn final_overdue(&self, started: Instant) -> Option<Error> {
+        let waited = started.elapsed();
+        let idle = self.last_message.elapsed().min(waited);
+        (idle >= self.final_idle || waited >= self.final_ceiling)
+            .then(|| final_timeout(waited, idle))
+    }
+    /// Experiments only: override the wait limits.
+    pub fn set_final_wait(&mut self, idle: Duration, ceiling: Duration) {
+        self.final_idle = idle;
+        self.final_ceiling = ceiling;
     }
     /// Samples (counted from this connection's start) and committed text that are
     /// final. Audio after `.0` is the only audio a replacement session must replay.
@@ -446,36 +604,29 @@ impl Live {
         self.text.complete = false;
         let mut end_sent = self.boundary_wait.is_none();
         if end_sent {
-            self.send(json!({"realtimeInput":{"activityEnd":{}}}))?;
+            self.send_end("release")?;
         }
         log::info!(
             "gemini_live audio_end frames={} samples={}",
             self.frames,
             self.samples
         );
-        let until = started + FINAL_TIMEOUT;
         let mut previous = self.finals;
-        while Instant::now() < until {
+        loop {
             if let Err(e) = self.poll() {
                 // A server may close immediately after its authoritative final.
                 // There can be nothing more to drain once that socket closes.
-                if matches!(e, Error::Offline | Error::Closed)
-                    && self.finals > 0
-                    && self.text.tentative.is_empty()
-                    && self.boundary_wait.is_none()
-                    && self.pending_audio.is_empty()
-                    && !self.turn_needs_final
-                {
+                if matches!(e, Error::Offline | Error::Closed) && self.drained() {
                     log::info!(
                         "gemini_live finalized_on_close release_ms={}",
                         started.elapsed().as_millis()
                     );
-                    return Ok(self.text.committed.clone());
+                    return self.committed_or_empty();
                 }
                 return Err(e);
             }
             if !end_sent && self.boundary_wait.is_none() {
-                self.send(json!({"realtimeInput":{"activityEnd":{}}}))?;
+                self.send_end("release, after boundary")?;
                 end_sent = true;
             }
             if self.finals != previous {
@@ -486,41 +637,70 @@ impl Live {
                     self.text.tentative.len()
                 );
             }
-            // Input transcripts have no guaranteed ordering with turnComplete.
-            // A quiet gap (even after one final) cannot prove the last packet
-            // arrived. Keep draining the existing bounded window unless the
-            // peer ends the socket after authoritative final text.
+            if end_sent && self.settled() {
+                log::info!(
+                    "gemini_live finalized release_ms={} frames={} partials={} finals={} turn_complete={}",
+                    started.elapsed().as_millis(),
+                    self.frames,
+                    self.partials,
+                    self.finals,
+                    self.text.complete
+                );
+                crate::trace::log("turn", || {
+                    format!("release settled after {} ms", started.elapsed().as_millis())
+                });
+                return self.committed_or_empty();
+            }
+            if end_sent {
+                let from = self.activity_end_at.unwrap_or(started);
+                if let Some(e) = self.final_overdue(from) {
+                    log::warn!(
+                        "gemini_live finalization_timeout release_ms={}; clip preserved, no whole-file upload",
+                        started.elapsed().as_millis()
+                    );
+                    return Err(e);
+                }
+            }
             std::thread::sleep(Duration::from_millis(1));
         }
-        // Transcribe Live may finalize the last utterance before release and
-        // send neither another final nor turnComplete after the recording-end signal.
-        // After the full drain, retain authoritative text already received;
-        // never promote a pending interim or return before delayed finals.
-        if end_sent
-            && self.finals > 0
+    }
+    /// Nothing left to wait for: every spoken turn has its final text.
+    fn drained(&self) -> bool {
+        self.finals > 0
             && self.text.tentative.is_empty()
             && self.boundary_wait.is_none()
             && self.pending_audio.is_empty()
             && !self.turn_needs_final
+    }
+    /// Release can return. Input transcripts have no guaranteed order with
+    /// turnComplete, so a spoken turn needs its final; then turnComplete, or a short
+    /// quiet spell, shows nothing else is coming. A turnComplete with no final for a
+    /// turn our energy gate called speech means Google heard none; wait 3 s, then move on.
+    fn settled(&self) -> bool {
+        if self.boundary_wait.is_some()
+            || !self.pending_audio.is_empty()
+            || !self.text.tentative.is_empty()
         {
-            log::info!(
-                "gemini_live finalized_after_drain release_ms={} frames={} partials={} finals={}",
-                started.elapsed().as_millis(),
-                self.frames,
-                self.partials,
-                self.finals
-            );
-            return if self.text.committed.trim().is_empty() {
-                Err(Error::Empty)
-            } else {
-                Ok(self.text.committed.clone())
-            };
+            return false;
         }
-        log::warn!(
-            "gemini_live finalization_timeout release_ms={}; clip preserved, no whole-file upload",
-            started.elapsed().as_millis()
-        );
-        Err(final_timeout())
+        if self.turn_needs_final {
+            // A spoken turn with no final yet: done only once Google has closed the
+            // turn (ACTIVITY_END) and stayed silent past the grace period.
+            return self
+                .end_acked
+                .is_some_and(|t| t.elapsed() >= EMPTY_TURN_GRACE);
+        }
+        // Finals can trail a completion marker (mock evidence), so even then stay open briefly.
+        let quiet = self.last_message.elapsed();
+        quiet >= SETTLE_QUIET
+            || ((self.generation_done || self.text.complete) && quiet >= SETTLE_AFTER_DONE)
+    }
+    fn committed_or_empty(&self) -> Result<String, Error> {
+        if self.text.committed.trim().is_empty() {
+            Err(Error::Empty)
+        } else {
+            Ok(self.text.committed.clone())
+        }
     }
 }
 #[cfg(test)]

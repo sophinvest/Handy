@@ -116,6 +116,7 @@ fn missing_final_is_bounded_and_never_promotes_tentative_text() {
         thread::sleep(Duration::from_millis(1800));
     });
     let mut live = client(addr);
+    live.set_final_wait(Duration::from_millis(500), Duration::from_millis(500));
     live.audio(&[0.25; 512]).unwrap();
     let start = Instant::now();
     assert_eq!(live.finish(), Err(Error::Timeout));
@@ -270,6 +271,7 @@ fn pause_next_turn_missing_final_never_pastes_the_previous_turn() {
         thread::sleep(Duration::from_millis(1800));
     });
     let mut live = client(addr);
+    live.set_final_wait(Duration::from_millis(500), Duration::from_millis(500));
     for i in 0..153 {
         live.audio(&[if (100..122).contains(&i) { 0.0 } else { 0.25 }; 512])
             .unwrap();
@@ -305,7 +307,8 @@ fn long_silence_after_a_final_never_ends_the_turn_or_drops_live() {
     });
     let mut live = client(addr);
     for i in 0..522 {
-        live.audio(&[if i < 100 { 0.25 } else { 0.0 }; 512]).unwrap();
+        live.audio(&[if i < 100 { 0.25 } else { 0.0 }; 512])
+            .unwrap();
         live.poll().unwrap();
         if i >= 122 {
             thread::sleep(Duration::from_millis(4));
@@ -572,5 +575,118 @@ fn resume_point_moves_only_when_a_turn_final_arrives() {
         live.poll().unwrap();
     }
     assert_eq!(live.resume_point(), (122 * 512, "First sentence."));
+    server.join().unwrap();
+}
+
+fn ack_end() -> Value {
+    json!({"serverContent":{},"voiceActivity":{"type":"ACTIVITY_END","audioOffset":"1.3s"}})
+}
+#[test]
+fn slow_final_beyond_the_old_1_5_s_limit_is_not_a_timeout() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let mut ws = accept(listener);
+        read(&mut ws);
+        assert!(read(&mut ws)["realtimeInput"]["activityEnd"].is_object());
+        // Silent for 2.5 s (well over the old 1.5 s limit), then the final.
+        thread::sleep(Duration::from_millis(2500));
+        send(
+            &mut ws,
+            json!({"serverContent":{"inputTranscription":{"text":"Slow but real."}}}),
+        );
+        send(
+            &mut ws,
+            json!({"serverContent":{"generationComplete":true}}),
+        );
+        thread::sleep(Duration::from_millis(900));
+    });
+    let mut live = client(addr);
+    live.audio(&[0.25; 512]).unwrap();
+    assert_eq!(live.finish().unwrap(), "Slow but real.");
+    server.join().unwrap();
+}
+#[test]
+fn partials_keep_a_long_wait_alive() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let mut ws = accept(listener);
+        read(&mut ws);
+        assert!(read(&mut ws)["realtimeInput"]["activityEnd"].is_object());
+        for i in 0..5 {
+            thread::sleep(Duration::from_millis(400));
+            send(
+                &mut ws,
+                json!({"serverContent":{"interimInputTranscription":{"text":format!("part {i}")}}}),
+            );
+        }
+        send(
+            &mut ws,
+            json!({"serverContent":{"inputTranscription":{"text":"Done."}}}),
+        );
+        thread::sleep(Duration::from_millis(900));
+    });
+    let mut live = client(addr);
+    // 600 ms idle limit: each 400 ms partial resets it, so 2 s in total is fine.
+    live.set_final_wait(Duration::from_millis(600), Duration::from_secs(10));
+    live.audio(&[0.25; 512]).unwrap();
+    assert_eq!(live.finish().unwrap(), "Done.");
+    server.join().unwrap();
+}
+#[test]
+fn mid_recording_turn_google_heard_no_speech_in_never_drops_live() {
+    // Measured on Jean's recording b14f4969: the energy gate saw speech, Google answered
+    // only ACTIVITY_END. That used to time out, retry the same audio and fall back.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let mut ws = accept(listener);
+        for _ in 0..122 {
+            assert!(read(&mut ws)["realtimeInput"]["audio"].is_object());
+        }
+        assert!(read(&mut ws)["realtimeInput"]["activityEnd"].is_object());
+        send(&mut ws, ack_end());
+        // No transcript. The client must carry on after the grace period.
+        assert!(read(&mut ws)["realtimeInput"]["activityStart"].is_object());
+        for _ in 0..30 {
+            assert!(read(&mut ws)["realtimeInput"]["audio"].is_object());
+        }
+        assert!(read(&mut ws)["realtimeInput"]["activityEnd"].is_object());
+        send(
+            &mut ws,
+            json!({"serverContent":{"inputTranscription":{"text":"Real words."}}}),
+        );
+        thread::sleep(Duration::from_millis(900));
+    });
+    let mut live = client(addr);
+    for i in 0..152 {
+        live.audio(&[if (100..122).contains(&i) { 0.0 } else { 0.25 }; 512])
+            .unwrap();
+        live.poll().unwrap();
+        if i >= 122 {
+            thread::sleep(Duration::from_millis(8));
+        }
+    }
+    assert!(live.boundary_wait.is_none(), "empty turn must be skipped");
+    assert_eq!(live.finish().unwrap(), "Real words.");
+    server.join().unwrap();
+}
+#[test]
+fn release_after_a_turn_with_no_speech_reports_empty_not_timeout() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let mut ws = accept(listener);
+        read(&mut ws);
+        assert!(read(&mut ws)["realtimeInput"]["activityEnd"].is_object());
+        send(&mut ws, ack_end());
+        thread::sleep(Duration::from_millis(800));
+    });
+    let mut live = client(addr);
+    live.audio(&[0.25; 512]).unwrap();
+    let start = Instant::now();
+    assert_eq!(live.finish(), Err(Error::Empty));
+    assert!(start.elapsed() < Duration::from_secs(2));
     server.join().unwrap();
 }

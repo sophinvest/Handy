@@ -517,6 +517,7 @@ impl ShortcutAction for TranscribeAction {
     fn start(&self, app: &AppHandle, binding_id: &str, _shortcut_str: &str) {
         let start_time = Instant::now();
         debug!("TranscribeAction::start called for binding: {}", binding_id);
+        handy_gemini::trace::log("key", || format!("press binding={binding_id}"));
 
         // Load model in the background
         let tm = app.state::<Arc<TranscriptionManager>>();
@@ -729,6 +730,7 @@ impl ShortcutAction for TranscribeAction {
 
         let stop_time = Instant::now();
         debug!("TranscribeAction::stop called for binding: {}", binding_id);
+        handy_gemini::trace::log("key", || format!("release binding={binding_id}"));
 
         let ah = app.clone();
         let rm = Arc::clone(&app.state::<Arc<AudioRecordingManager>>());
@@ -958,9 +960,19 @@ impl ShortcutAction for TranscribeAction {
                                         // UI while this paste ran.
                                         let owns_ui =
                                             || RECORDING_SESSION.load(Ordering::SeqCst) == session;
+                                        handy_gemini::trace::log("paste", || {
+                                            format!(
+                                                "start chars={} text=\"{}\"",
+                                                final_text.len(),
+                                                final_text
+                                            )
+                                        });
                                         let (outcome, notice) =
                                             match utils::paste(final_text, ah_clone.clone()) {
                                                 Ok(()) => {
+                                                    handy_gemini::trace::log("paste", || {
+                                                        format!("ok in {:?}", paste_time.elapsed())
+                                                    });
                                                     debug!(
                                                         "Text pasted successfully in {:?}",
                                                         paste_time.elapsed()
@@ -981,6 +993,9 @@ impl ShortcutAction for TranscribeAction {
                                                     (TranscriptionOutcome::Typed, notice)
                                                 }
                                                 Err(e) => {
+                                                    handy_gemini::trace::log("paste", || {
+                                                        format!("FAILED: {e}")
+                                                    });
                                                     error!("Failed to paste transcription: {}", e);
                                                     (
                                                         TranscriptionOutcome::Failed,
@@ -1038,6 +1053,9 @@ impl ShortcutAction for TranscribeAction {
                             }
 
                             error!("Transcription failed: {}", err);
+                            handy_gemini::trace::log("failure", || {
+                                format!("transcription failed, shown to user: {err}")
+                            });
                             notices::raise(
                                 &ah,
                                 Notice::new(

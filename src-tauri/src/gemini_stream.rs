@@ -43,6 +43,7 @@ pub fn active() -> bool {
 static LAST_PREVIEW: Mutex<Option<(String, String, Instant)>> = Mutex::new(None);
 pub fn engine(app: &AppHandle, state: &str) {
     log::info!("dictation_engine state={} local_inference=disabled", state);
+    handy_gemini::trace::log("engine", || format!("state={state}"));
     let _ = app.emit("transcription-engine", state);
 }
 fn preview(app: &AppHandle, committed: &str, tentative: &str) {
@@ -59,6 +60,9 @@ fn preview(app: &AppHandle, committed: &str, tentative: &str) {
         }
         *last = Some((committed.into(), tentative.into(), Instant::now()));
     }
+    handy_gemini::trace::log("overlay_text", || {
+        format!("committed=\"{committed}\" tentative=\"{tentative}\"")
+    });
     let _ = crate::managers::transcription::StreamTextEvent {
         committed: committed.into(),
         tentative: tentative.into(),
@@ -89,23 +93,31 @@ fn diag(
     outcome: &str,
     wait: Option<Duration>,
 ) {
-    log::warn!(
-        "{}",
-        resilience::line(&Diag {
-            mode,
-            error,
-            detail,
-            session_age_ms,
-            audio_ms: audio_ms(samples),
-            attempt: state.attempt(),
-            max_attempts: state.max_attempts(),
-            outcome,
-            wait_ms: wait.map(|w| w.as_millis()),
-        })
-    );
+    let line = resilience::line(&Diag {
+        mode,
+        error,
+        detail,
+        session_age_ms,
+        audio_ms: audio_ms(samples),
+        attempt: state.attempt(),
+        max_attempts: state.max_attempts(),
+        outcome,
+        wait_ms: wait.map(|w| w.as_millis()),
+    });
+    handy_gemini::trace::log("diag", || line.clone());
+    log::warn!("{line}");
 }
 /// Overlay state while waiting to retry: `google_retry|class|attempt|max|wait_seconds`.
 fn retrying(app: &AppHandle, error: &GeminiError, state: &RetryState, wait: Duration) {
+    handy_gemini::trace::log("retry", || {
+        format!(
+            "class={} attempt={}/{} wait_ms={}",
+            error.class(),
+            state.attempt(),
+            state.max_attempts(),
+            wait.as_millis()
+        )
+    });
     engine(
         app,
         &format!(
@@ -517,7 +529,8 @@ fn revive(
 ) -> Option<(Live, usize)> {
     let model = model?;
     let tail = &audio[point.from.min(audio.len())..];
-    let mut state = RetryState::default();
+    // A dropped Live session is reconnected for about a minute before Live is given up on.
+    let mut state = RetryState::persistent();
     let (mut error, mut detail) = (point.error.clone(), point.detail.clone());
     loop {
         let Some(wait) = state.next(&error, &detail) else {
@@ -571,6 +584,28 @@ fn revive(
             }
         }
     }
+}
+/// Pause pieces send one unary request per chunk, so they are only a stand-in when
+/// Live cannot connect at all (network or server trouble that outlasted a minute of
+/// reconnects). A quota, key or request error would fail there too (and a pieces
+/// switch is what used to trip the free-tier limit), so those end the dictation
+/// with the clip saved instead (SOP-10811).
+fn no_pieces(error: &GeminiError) -> Option<String> {
+    (!resilience::retryable(error)).then(|| {
+        format!(
+            "{}. Clip saved; Live was not replaced by pause pieces",
+            resilience::describe(error, &resilience::last())
+        )
+    })
+}
+fn trace_switch(what: &str, error: &GeminiError) {
+    handy_gemini::trace::log("engine", || {
+        format!(
+            "switch {what} because {} ({})",
+            error.class(),
+            resilience::last().message.unwrap_or_default()
+        )
+    });
 }
 fn live_failure(error: &GeminiError, mode: &str, age_ms: u128, samples: usize) -> String {
     live_failure_with(error, &resilience::last(), mode, age_ms, samples)
@@ -696,7 +731,11 @@ fn worker(
                                 resilience::describe(&e, &resilience::last())
                             ));
                         }
+                        if let Some(message) = no_pieces(&e) {
+                            return Err(message);
+                        }
                         log::warn!("gemini_live fallback=pause_pieces reason={}", e);
+                        trace_switch("live_to_pieces", &e);
                         engine(app, "google_pieces");
                         // Never paste an incomplete live prefix. Reprocess this
                         // complete recording in pause pieces, in order.
@@ -792,7 +831,11 @@ fn worker(
                         resilience::describe(&e, &resilience::last())
                     ));
                 }
+                if let Some(message) = no_pieces(&e) {
+                    return Err(message);
+                }
                 log::warn!("gemini_live fallback=pause_pieces reason={}", e);
+                trace_switch("live_to_pieces", &e);
                 engine(app, "google_pieces");
                 live = None;
                 prefix.clear();
