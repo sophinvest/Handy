@@ -54,12 +54,16 @@ thread_local! {
     static LAST: RefCell<Detail> = RefCell::new(Detail::default());
 }
 pub fn note(detail: Detail) {
-    crate::trace::log("failure", || {
-        format!(
-            "http={:?} ws_close={:?} status={:?} message={:?} retry_after={:?}",
-            detail.http, detail.ws_close, detail.status, detail.message, detail.retry_after
-        )
-    });
+    // A cleared detail has nothing to say; logging it looked like a failure with every
+    // field `None` (SOP-10847).
+    if detail != Detail::default() {
+        crate::trace::log("failure", || {
+            format!(
+                "http={:?} ws_close={:?} status={:?} message={:?} retry_after={:?}",
+                detail.http, detail.ws_close, detail.status, detail.message, detail.retry_after
+            )
+        });
+    }
     LAST.with(|l| *l.borrow_mut() = detail);
 }
 pub fn last() -> Detail {

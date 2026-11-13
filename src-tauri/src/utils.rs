@@ -101,6 +101,9 @@ fn native_windows_machine() -> Option<u16> {
 /// Handles cancelling both recording and transcription operations and updates UI state.
 pub fn cancel_current_operation(app: &AppHandle) {
     info!("Initiating operation cancellation...");
+    handy_gemini::trace::log("cancel", || {
+        "cancel requested (cancel shortcut, tray Cancel or --cancel)".into()
+    });
 
     // Unregister the cancel shortcut asynchronously
     shortcut::unregister_cancel_shortcut(app);

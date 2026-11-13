@@ -69,6 +69,42 @@ pub fn delete(dir: &Path, id: &str) -> Result<(), String> {
     let _ = fs::remove_file(path.with_extension("json"));
     Ok(())
 }
+/// Subfolder of the recovery folder holding the audio of dictations that worked.
+pub const KEPT_DIR: &str = "dictations";
+/// How many finished dictations are kept (newest first); older ones are removed.
+pub const KEEP_DICTATIONS: usize = 100;
+fn prune(kept: &Path, max: usize) {
+    let Ok(entries) = fs::read_dir(kept) else {
+        return;
+    };
+    let mut ids: Vec<(i64, PathBuf)> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| Some((timestamp(&e.file_name().to_string_lossy())?, e.path())))
+        .collect();
+    ids.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, path) in ids.into_iter().skip(max) {
+        let _ = fs::remove_file(path);
+    }
+}
+/// A dictation that worked leaves the retry list but its audio is kept, so the next good
+/// example can be sent for tuning (SOP-10847). The caller-owned retry list stays failures only.
+pub fn keep(dir: &Path, id: &str) -> Result<(), String> {
+    keep_with(dir, id, KEEP_DICTATIONS)
+}
+fn keep_with(dir: &Path, id: &str, max: usize) -> Result<(), String> {
+    let from = resolve(dir, id)?;
+    let kept = dir.join(KEPT_DIR);
+    fs::create_dir_all(&kept).map_err(|_| "Cannot create the folder for finished dictations")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&kept, fs::Permissions::from_mode(0o700));
+    }
+    fs::rename(&from, kept.join(id)).map_err(|_| "Cannot keep the finished dictation")?;
+    let _ = fs::remove_file(from.with_extension("json"));
+    prune(&kept, max);
+    Ok(())
+}
 pub fn recover(
     dir: &Path,
     id: Option<&str>,
@@ -91,7 +127,7 @@ pub fn recover(
         return Err("No text was recognized. The clip is still saved".into());
     }
     deliver(&text)?;
-    delete(dir, &id).map_err(|_| {
+    keep(dir, &id).map_err(|_| {
         "Text delivered, but clip could not be removed. Delete it to avoid duplicate text"
     })?;
     Ok(text)
@@ -222,5 +258,35 @@ mod tests {
         assert_eq!(list(&f.0).unwrap().len(), 1);
         delete(&f.0, "200.wav").unwrap();
         assert!(recover(&f.0, None, |_| panic!("empty"), |_| panic!("empty")).is_err());
+    }
+    #[test]
+    fn a_finished_dictation_leaves_the_retry_list_but_its_audio_is_kept() {
+        // Regression (SOP-10847): successful dictations used to delete their WAV, so the
+        // recovery folder stopped receiving files once failures stopped.
+        let f = Fixture::new();
+        f.clip("100.wav");
+        f.clip("200.wav");
+        keep(&f.0, "200.wav").unwrap();
+        assert_eq!(list(&f.0).unwrap().len(), 1);
+        assert!(f.0.join(KEPT_DIR).join("200.wav").exists());
+        assert!(!f.0.join("200.json").exists());
+        // A retried clip that finally worked is kept too.
+        recover(&f.0, Some("100.wav"), |_| Ok("text".into()), |_| Ok(())).unwrap();
+        assert!(f.0.join(KEPT_DIR).join("100.wav").exists());
+        assert!(list(&f.0).unwrap().is_empty());
+    }
+    #[test]
+    fn kept_dictations_are_limited_to_the_newest() {
+        let f = Fixture::new();
+        for id in ["100.wav", "200.wav", "300.wav", "400.wav"] {
+            f.clip(id);
+            keep_with(&f.0, id, 3).unwrap();
+        }
+        let mut left: Vec<_> = fs::read_dir(f.0.join(KEPT_DIR))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["200.wav", "300.wav", "400.wav"]);
     }
 }

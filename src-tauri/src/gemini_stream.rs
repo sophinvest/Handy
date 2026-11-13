@@ -250,8 +250,16 @@ pub fn begin(app: &AppHandle) -> Result<crate::audio_toolkit::audio::AudioFrameC
         .name("gemini-cloud".into())
         .spawn(move || {
             let answer = worker(&app, rx, &ws, &wl, &wc, &wr, &wp);
-            if answer.is_err() {
-                engine(&app, "google_error");
+            if let Err(cause) = &answer {
+                // Say WHY the dictation ended: Esc / tray Cancel / --cancel, or a real error
+                // (SOP-10847: a red dot with no recorded cause at 12:29:45 on 2026-11-13).
+                let cancelled = wc.load(Ordering::Acquire);
+                handy_gemini::trace::log("failure", || {
+                    format!("dictation ended with an error, cancelled_by_user={cancelled}: {cause}")
+                });
+                if !cancelled {
+                    engine(&app, "google_error");
+                }
             }
             let _ = reply.send((answer, guard));
         })
@@ -286,6 +294,7 @@ fn feed_callback(
 pub fn cancel() {
     if let Ok(mut s) = SESSION.lock() {
         if let Some(s) = s.take() {
+            handy_gemini::trace::log("cancel", || "Google session cancelled".into());
             s.cancel.store(true, Ordering::Release);
             s.stop.store(true, Ordering::Release);
         }

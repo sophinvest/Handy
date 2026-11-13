@@ -254,7 +254,17 @@ pub fn transcribe(
     })()
     .map_err(|e: String| failed(app, e));
     if result.is_ok() {
-        let _ = fs::remove_file(&path);
+        // Keep the audio of every dictation that worked (SOP-10847); never leave it in
+        // the retry list, where it would be offered again as a failure.
+        let kept = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|id| crate::saved_clips::keep(&pending_dir(app)?, id))
+            .unwrap_or_else(|| Err("Clip has no name".into()));
+        if kept.is_err() {
+            let _ = fs::remove_file(&path);
+            let _ = fs::remove_file(path.with_extension("json"));
+        }
         let _ = app.emit("gemini-clips-changed", ());
     }
     Ok((guard, path, result))

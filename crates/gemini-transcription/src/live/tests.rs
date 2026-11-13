@@ -691,3 +691,124 @@ fn release_after_a_turn_with_no_speech_reports_empty_not_timeout() {
     assert!(start.elapsed() < Duration::from_secs(2));
     server.join().unwrap();
 }
+fn joined(parts: &[&str]) -> String {
+    let mut t = String::new();
+    for p in parts {
+        append_segment(&mut t, p);
+    }
+    t
+}
+#[test]
+fn mid_sentence_pieces_continue_in_lower_case_jean_example() {
+    // Jean's 2026-11-13 12:27 dictation, pieces as Google finalised them (SOP-10847).
+    assert_eq!(
+        joined(&[
+            "Add this information and research you gave here as a note to the loan and also",
+            "Explain layer what the timelines are on the",
+            "tax certificate How much time is there before the tax investor gets a deed and is there any",
+            "Tell me after that for redemption.",
+        ]),
+        "Add this information and research you gave here as a note to the loan and also \
+         explain layer what the timelines are on the tax certificate How much time is there \
+         before the tax investor gets a deed and is there any tell me after that for redemption."
+    );
+}
+#[test]
+fn finished_sentences_keep_their_capitals_and_stops() {
+    assert_eq!(
+        joined(&["Hello.", "Next sentence!", "Yes?", "Fine."]),
+        "Hello. Next sentence! Yes? Fine."
+    );
+    assert_eq!(
+        joined(&["He said \"stop.\"", "Then left."]),
+        "He said \"stop.\" Then left."
+    );
+    assert_eq!(
+        joined(&["I will do it then.", "Thanks."]),
+        "I will do it then. Thanks."
+    );
+    assert_eq!(joined(&["Wait...", "Okay"]), "Wait... Okay");
+}
+#[test]
+fn a_stop_after_a_dangling_word_is_dropped() {
+    assert_eq!(
+        joined(&["Please send it to the.", "Lender today."]),
+        "Please send it to the lender today."
+    );
+}
+#[test]
+fn continuation_keeps_i_acronyms_names_and_mixed_case() {
+    assert_eq!(joined(&["then", "I think so"]), "then I think so");
+    assert_eq!(joined(&["then", "I'm sure"]), "then I'm sure");
+    assert_eq!(joined(&["and the", "FDIC rule"]), "and the FDIC rule");
+    assert_eq!(joined(&["and the", "iPhone"]), "and the iPhone");
+    assert_eq!(joined(&["we met on", "Monday"]), "we met on Monday");
+    assert_eq!(
+        joined(&["I spoke with Tom about the loan and then", "Tom said yes"]),
+        "I spoke with Tom about the loan and then Tom said yes"
+    );
+    assert_eq!(joined(&["Hello", " world"]), "Hello world");
+    assert_eq!(joined(&["hello", ", There"]), "hello, There");
+}
+/// Server for the two phrase-length tests: it answers the first audio frame with
+/// `interim`, then reports how many activityEnd messages arrived before the client left.
+fn phrase_server(interim: &'static str) -> (std::net::SocketAddr, thread::JoinHandle<usize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let mut ws = accept(listener);
+        let (mut ends, mut first) = (0, true);
+        while let Ok(Message::Text(t)) = ws.read() {
+            let v: Value = serde_json::from_str(&t).unwrap();
+            if v["realtimeInput"]["activityEnd"].is_object() {
+                ends += 1;
+            } else if first && v["realtimeInput"]["audio"].is_object() {
+                first = false;
+                send(
+                    &mut ws,
+                    json!({"serverContent":{"interimInputTranscription":{"text":interim}}}),
+                );
+            }
+        }
+        ends
+    });
+    (addr, server)
+}
+fn speak_then_pause(live: &mut Live, silent_frames: usize) {
+    for i in 0..100 + silent_frames {
+        live.audio(&[if i < 100 { 0.25 } else { 0.0 }; 512])
+            .unwrap();
+        live.poll().unwrap();
+        if i < 30 {
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+}
+#[test]
+fn unfinished_phrase_waits_for_the_longer_pause_before_the_turn_is_cut() {
+    let (addr, server) = phrase_server("Add this and also");
+    let mut live = client(addr);
+    // 1.6 s of quiet is past the 0.7 s test quiet but short of the 2.5 s open quiet.
+    speak_then_pause(&mut live, 50);
+    assert!(
+        live.boundary_wait.is_none(),
+        "cut an unfinished phrase early"
+    );
+    // 3.2 s of quiet in total passes the open quiet: now it is cut.
+    for _ in 0..50 {
+        live.audio(&[0.0; 512]).unwrap();
+        live.poll().unwrap();
+    }
+    assert!(live.boundary_wait.is_some());
+    drop(live);
+    assert_eq!(server.join().unwrap(), 1);
+}
+#[test]
+fn finished_sentence_is_cut_at_the_short_pause() {
+    let (addr, server) = phrase_server("Add this and also.");
+    let mut live = client(addr);
+    speak_then_pause(&mut live, 30);
+    assert!(live.boundary_wait.is_some());
+    drop(live);
+    assert_eq!(server.join().unwrap(), 1);
+}

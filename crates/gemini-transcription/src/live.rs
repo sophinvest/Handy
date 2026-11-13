@@ -1,6 +1,8 @@
-// ALGORITHM VERSION 1.5 — 2026-11-13 (Live turn cadence; pause/energy rules live in pieces.rs)
+// ALGORITHM VERSION 1.6 — 2026-11-13 (Live turn cadence; pause/energy rules live in pieces.rs)
 // 1. Recording owns the Google turn (manual activity); send every sample exactly once.
-// 2. After at least 3 s of turn audio and 1.5 s of detected quiet, send activityEnd.
+// 2. After at least 3 s of turn audio and 1.5 s of detected quiet, send activityEnd, EXCEPT
+//    while Google's running text for the turn has no sentence end yet (no . ? ! at its end):
+//    then the speaker is most likely thinking mid-sentence, so wait for 4.5 s of quiet instead.
 // 3. Queue all audio (speech and silence) until Google answers the turn, then activityStart
 //    and flush in order. "Answers" means ONE of: a final transcript; or Google's
 //    voiceActivity ACTIVITY_END followed by 3 s with no transcript (Google heard no speech:
@@ -25,6 +27,12 @@
 //    closed without any transcript for 3 s counts as empty, so release never fails on it.
 // v1.5 — SOP-10811: the 1.5 s final wait (and 0.3 s send limit) removed; Google's empty
 //    turns no longer count as timeouts; release settles on generationComplete.
+// 9. Joining finals (append_segment): when the text so far does not end a sentence, the next
+//    piece continues it: its first letter is lower-cased (never "I", "I'm", acronyms, words
+//    like iPhone, months/days, or a name already seen capitalised mid-sentence), and a full
+//    stop Google put after a dangling word ("... on the.") is dropped.
+// v1.6 — SOP-10847: mid-sentence pauses. 4.5 s quiet while the phrase is unfinished; join
+//    rule 9. Measured on Jean's 11-13 log: unfinished-phrase pauses were 1.4-3.8 s.
 //! Dedicated Transcribe Live socket, with bounded network waits and no key in
 //! the URL or errors. It never pastes or owns the microphone.
 use crate::{resilience, Error, TIMEOUT};
@@ -47,6 +55,13 @@ pub const LIVE_MIN_TURN_MS: u32 = 3000;
 pub const LIVE_QUIET_MS: u32 = 1500;
 #[cfg(test)]
 pub const LIVE_QUIET_MS: u32 = 700;
+/// Quiet needed to end a phrase whose running text has no sentence end yet (SOP-10847).
+/// Jean's mid-sentence thinking pauses measured 1.4-3.8 s; Google already ends a
+/// finished sentence with a stop, which keeps the short 1.5 s cut for those.
+#[cfg(not(test))]
+pub const LIVE_QUIET_OPEN_MS: u32 = 4500;
+#[cfg(test)]
+pub const LIVE_QUIET_OPEN_MS: u32 = 2500;
 /// A final transcript is overdue only when Google has been silent this long. Any
 /// server message (partial, final, turnComplete) restarts the clock (SOP-10811).
 pub const FINAL_IDLE: Duration = Duration::from_secs(20);
@@ -171,9 +186,111 @@ pub struct Text {
     pub tentative: String,
     pub complete: bool,
 }
+/// True when `text` (ignoring trailing spaces and closing quotes/brackets) ends a sentence.
+pub fn ends_sentence(text: &str) -> bool {
+    text.trim_end()
+        .trim_end_matches(|c: char| "\"')]}”’»".contains(c))
+        .ends_with(|c: char| ".?!…。！？".contains(c))
+}
+/// Words a speaker cannot end a sentence on. A stop after one of these is Google guessing.
+const DANGLING: [&str; 40] = [
+    "and", "or", "but", "the", "a", "an", "to", "of", "in", "on", "at", "for", "with", "by",
+    "from", "if", "because", "also", "is", "are", "was", "were", "be", "been", "as", "than",
+    "into", "about", "any", "my", "your", "our", "their", "his", "her", "its", "which", "who",
+    "when", "while",
+];
+const ALWAYS_CAPITAL: [&str; 19] = [
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+    "January",
+    "February",
+    "March",
+    "April",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+    "Google",
+];
+fn last_word(text: &str) -> &str {
+    text.trim_end()
+        .trim_end_matches(|c: char| !c.is_alphanumeric())
+        .rsplit(|c: char| !(c.is_alphanumeric() || c == '\''))
+        .next()
+        .unwrap_or("")
+}
+/// The text so far stops on a word no sentence ends on, even if Google added a stop.
+fn dangling_stop(text: &str) -> bool {
+    let t = text.trim_end();
+    t.ends_with('.')
+        && !t.ends_with("..")
+        && DANGLING.contains(&last_word(t).to_lowercase().as_str())
+}
+/// A capitalised word that already appears capitalised in the middle of `text` is a name.
+fn seen_as_name(text: &str, word: &str) -> bool {
+    let mut previous: Option<&str> = None;
+    for token in text.split_whitespace() {
+        if let Some(p) = previous {
+            let bare = token.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'');
+            if bare == word && !ends_sentence(p) {
+                return true;
+            }
+        }
+        previous = Some(token);
+    }
+    false
+}
+/// `part` continues an unfinished sentence: lower-case its first letter when that
+/// letter is only there because Google started a new turn.
+fn lower_first(text: &str, part: &str) -> String {
+    let start = part.len() - part.trim_start().len();
+    let rest = &part[start..];
+    let Some(first) = rest.chars().next() else {
+        return part.to_owned();
+    };
+    let word: String = rest
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '\'')
+        .collect();
+    let letters: Vec<char> = word.chars().filter(|c| c.is_alphabetic()).collect();
+    let keep = !first.is_uppercase()
+        || word == "I"
+        || word.starts_with("I'")
+        || letters.iter().skip(1).any(|c| c.is_uppercase())
+        || ALWAYS_CAPITAL.contains(&word.as_str())
+        || seen_as_name(text, &word);
+    let lower: String = first.to_lowercase().collect();
+    if keep || lower.chars().count() != 1 {
+        return part.to_owned();
+    }
+    format!("{}{}{}", &part[..start], lower, &rest[first.len_utf8()..])
+}
 /// Join authoritative utterances/pieces, never speculative partial tokens.
-/// Preserve intentional repetitions and punctuation; only supply missing whitespace.
+/// Preserve intentional repetitions and punctuation; supply missing whitespace.
+/// When the text so far is an unfinished sentence (no stop, or a stop after a word like
+/// "the"), the next piece continues it: no capital letter, no stray stop (SOP-10847).
 pub fn append_segment(text: &mut String, part: &str) {
+    let joined;
+    let mut part = part;
+    if !text.trim().is_empty() && !part.trim().is_empty() {
+        let stray = dangling_stop(text);
+        if stray || !ends_sentence(text) {
+            if stray {
+                let keep = text.trim_end().len() - 1;
+                text.truncate(keep);
+            }
+            joined = lower_first(text, part);
+            part = &joined;
+        }
+    }
     if !text.is_empty()
         && !part.is_empty()
         && !text.ends_with(char::is_whitespace)
@@ -364,6 +481,14 @@ impl Live {
         }
         let speech = crate::pieces::is_speech(samples);
         self.turn_needs_final |= speech;
+        // A phrase Google has not punctuated yet is probably a thinking pause, not an
+        // ending: give it longer before the turn is cut (SOP-10847).
+        let open = !self.text.tentative.trim().is_empty() && !ends_sentence(&self.text.tentative);
+        self.pause_cutter.set_quiet_ms(if open {
+            LIVE_QUIET_OPEN_MS
+        } else {
+            LIVE_QUIET_MS
+        });
         let pcm: Vec<u8> = samples
             .iter()
             .flat_map(|s| ((s.clamp(-1.0, 1.0) * 32767.0).round() as i16).to_le_bytes())

@@ -1,4 +1,4 @@
-// ALGORITHM VERSION 1.1 — 2026-11-13
+// ALGORITHM VERSION 1.2 — 2026-11-13
 // 1. Treat a 32 ms frame above -40 dB RMS as speech; retain every sample regardless.
 // 2. Pieces mode: wait for the 30/60/90 second minimum and 0.4 s quiet before a cut.
 //    Live mode (live.rs): wait for a 3 s minimum turn and 0.7 s quiet, so Google
@@ -9,6 +9,7 @@
 // A conservative energy gate replaces neural VAD so cloud mode loads no local model.
 // It may delay a cut in noise; it must never discard or shorten the original recording.
 // v1.0 — SOP-10742: model-free pause signal shared by capture and manual recovery.
+// v1.2 — SOP-10847: Cutter::set_quiet_ms lets Live wait longer for an unfinished phrase.
 // v1.1 — SOP-10774: Cutter takes its own minimum/quiet; Live uses 3 s / 0.7 s, pieces keep 30-90 s / 0.4 s.
 pub fn is_speech(frame: &[f32]) -> bool {
     !frame.is_empty() && frame.iter().map(|s| s * s).sum::<f32>() / frame.len() as f32 > 0.0001
@@ -50,6 +51,10 @@ impl Cutter {
             target: min_ms as usize * RATE / 1000,
             quiet_needed: (quiet_ms as usize * RATE / 1000).max(1),
         }
+    }
+    /// Change the quiet needed for the next cut (Live waits longer mid-sentence).
+    pub fn set_quiet_ms(&mut self, quiet_ms: u32) {
+        self.quiet_needed = (quiet_ms as usize * RATE / 1000).max(1);
     }
     /// Return the end of at least 0.4 seconds of detected non-speech, after
     /// the configured target. Every sample, including silence, stays in order.
