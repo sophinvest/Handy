@@ -148,3 +148,11 @@ The overlay engine state `google_retry|class|attempt|max|wait_seconds` is format
 ## Silence no longer drops Live (gemini.10, SOP-10793)
 
 Cause (from code; Jean's report): after a phrase's final, the next Live turn held only silence. Once it reached 3 s plus 0.7 s of quiet, `live.rs` sent `activityEnd`, but Google emits no final for a turn with no speech, so the 1.5 s wait timed out. The timeout was treated as a Live failure and the app fell back to pause pieces, whose engine label ("Google: pause pieces") also cleared the overlay text, so the box shrank and stayed small. Fix (`live.rs` algorithm 1.3): a turn with no detected speech is never ended; it stays open and the silence is sent as audio. `gemini_stream.rs` also keeps the text already on screen if a fallback to pieces ever does happen, until the replayed pieces cover it. The overlay no longer collapses during a pause.
+
+## What can change the pasted text, label and status light (gemini.10, SOP-10793)
+
+Reported: pasted text had different punctuation and sentence breaks than the final plain overlay text. Findings from code: the Live path returns exactly `Live.text.committed` (the same string the overlay shows) and `gemini::transcribe` uses it as-is, with no release-time Google request and no `outputTranscription`. Only two optional steps can rewrite the text afterwards: the LLM post-process (the post-process shortcut, `actions.rs`) and the user transcription hook (`hooks/transcription`). Not provable from here which one ran on Jean's laptop, so gemini.10 (a) writes one `paste_text llm_post_process=… hook=… rewritten_by_llm=…` line per paste (no text), and (b) switches the status line to "Post-processing…" for exactly the period either step runs (before, the working label kept saying "Google live" because it ignored the work kind).
+
+Status light (`RecordingOverlay.tsx`, `engineStatus`): green = Google live connected; amber = connecting, retrying, pause pieces, uploading; red = Google error; unchanged accent for local models; grey while the microphone is still arming.
+
+Live phrase boundary: quiet needed to end a phrase is now 1.5 s (was 0.7 s, `LIVE_QUIET_MS`, live.rs algorithm 1.4) so a thinking pause mid-sentence no longer splits it. This is a reasoned default, not a measured winner: scoring 0.7/1.2/1.5/2 s needs recorded real speech with thinking pauses and Jean's key.

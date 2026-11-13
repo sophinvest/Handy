@@ -45,6 +45,15 @@ const engineLabel = (t: TFunction, engine: string) => {
   return t(`gemini.engine.${engine}`);
 };
 
+// Status-light colour for the dot: green = connected to Google live, amber =
+// connecting / retrying / fallback / uploading, red = error (SOP-10793).
+const engineStatus = (engine: string) => {
+  if (engine === "google_live") return "ok";
+  if (engine === "google_error") return "error";
+  if (engine.startsWith("google_")) return "busy";
+  return "";
+};
+
 const isNoticeState = (state: OverlayState) =>
   state === "notice" || state === "live_notice";
 
@@ -355,7 +364,10 @@ const RecordingOverlay: React.FC = () => {
   const listeningRow = (showTimer: boolean, showCancel: boolean) => (
     <div className="sbase">
       <div className="sbase-l">
-        <span className={`sdot ${captureReady ? "ready" : "arming"}`} />
+        <span
+          className={`sdot ${captureReady ? "ready" : "arming"}`}
+          data-status={engineStatus(engine)}
+        />
       </div>
       {engine === "local" ? (
         <span className="sengine" data-engine={engine}>
@@ -382,7 +394,11 @@ const RecordingOverlay: React.FC = () => {
         <span className="sspinner" />
       </div>
       <span className="swork-label">
-        {engine.startsWith("google_") ? engineLabel(t, engine) : label}
+        {workKind === "polishing" && engine.startsWith("google_")
+          ? t("gemini.engine.google_polishing")
+          : engine.startsWith("google_")
+            ? engineLabel(t, engine)
+            : label}
       </span>
       <div className="sbase-r">{showCancel && cancelBtn}</div>
     </div>

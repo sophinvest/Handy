@@ -326,6 +326,19 @@
   opacity: 0.45;
   animation: none;
 }
+/* Status light for Google modes. Overrides the accent only once capture is ready. */
+.sdot.ready[data-status="ok"] {
+  --s-accent: #2fb15a;
+  --s-accent-soft: rgb(47 177 90 / 0.35);
+}
+.sdot.ready[data-status="busy"] {
+  --s-accent: #f0a020;
+  --s-accent-soft: rgb(240 160 32 / 0.35);
+}
+.sdot.ready[data-status="error"] {
+  --s-accent: #e5484d;
+  --s-accent-soft: rgb(229 72 77 / 0.35);
+}
 @keyframes sdot-pulse {
   0% {
     box-shadow: 0 0 0 0 var(--s-accent-soft);

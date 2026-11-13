@@ -1051,6 +1051,7 @@
       "google_connecting": "Google: connecting",
       "google_live": "● Google live",
       "google_pieces": "Google: pause pieces",
+      "google_polishing": "Post-processing…",
       "google_uploading": "Google: uploading",
       "google_error": "Google: error",
       "google_retry": "Google: {{reason}} — retrying ({{attempt}}/{{max}})",

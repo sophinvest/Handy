@@ -907,6 +907,17 @@ impl ShortcutAction for TranscribeAction {
 
                             // The user's hook only changes what gets pasted;
                             // history above keeps the text as produced.
+                            let hook_rewrites = crate::transcription_hook::exists(&ah);
+                            if hook_rewrites && use_streaming_overlay && !post_process {
+                                tm.emit_stream_working(StreamWorkKind::Polishing);
+                            }
+                            // Metadata only, no text: which steps may rewrite the paste (SOP-10793).
+                            info!(
+                                "paste_text llm_post_process={} hook={} rewritten_by_llm={}",
+                                post_process,
+                                hook_rewrites,
+                                processed.post_processed_text.is_some()
+                            );
                             let Some(final_text) = complete_unless_cancelled(
                                 crate::transcription_hook::apply(&ah, processed.final_text),
                                 || rm.was_cancelled_since(cancel_generation),

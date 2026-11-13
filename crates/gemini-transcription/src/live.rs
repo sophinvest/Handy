@@ -1,6 +1,6 @@
-// ALGORITHM VERSION 1.3 — 2026-11-13 (Live turn cadence; pause/energy rules live in pieces.rs)
+// ALGORITHM VERSION 1.4 — 2026-11-13 (Live turn cadence; pause/energy rules live in pieces.rs)
 // 1. Recording owns the Google turn (manual activity); send every sample exactly once.
-// 2. After at least 3 s of turn audio and 0.7 s of detected quiet, send activityEnd.
+// 2. After at least 3 s of turn audio and 1.5 s of detected quiet, send activityEnd.
 // 3. Queue all audio (speech and silence) until Google's final arrives, then activityStart
 //    and flush in order; bounded to 1.5 s, release shares that deadline.
 // 4. Finals therefore arrive phrase by phrase and only the current phrase stays provisional.
@@ -14,6 +14,7 @@
 // 6. A turn that held no detected speech is never ended: Google sends no final for it, so
 //    the 1.5 s wait would time out and Live would drop on any pause over ~3 s.
 // v1.3 — SOP-10793: silence-only turns stay open; fallback keeps the overlay text.
+// v1.4 — SOP-10793: quiet needed to end a phrase raised 0.7 s -> 1.5 s (mid-sentence thinking pauses).
 //! Dedicated Transcribe Live socket, with bounded network waits and no key in
 //! the URL or errors. It never pastes or owns the microphone.
 use crate::{resilience, Error, TIMEOUT};
@@ -29,6 +30,12 @@ const HOST: &str = "generativelanguage.googleapis.com";
 const URL: &str = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
 /// Live phrase cadence (SOP-10774): minimum turn length and required quiet.
 pub const LIVE_MIN_TURN_MS: u32 = 3000;
+/// 1.5 s of quiet: people pause mid-sentence to think, and a shorter cut punctuates
+/// each fragment as a sentence (SOP-10793). Unit tests keep the 0.7 s timing their
+/// fixed frame counts were written for.
+#[cfg(not(test))]
+pub const LIVE_QUIET_MS: u32 = 1500;
+#[cfg(test)]
 pub const LIVE_QUIET_MS: u32 = 700;
 const FINAL_TIMEOUT: Duration = Duration::from_millis(1500);
 /// Pause between replayed 32 ms frames when resuming a session.

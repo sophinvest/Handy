@@ -13,6 +13,13 @@ use tokio::process::Command;
 /// Hung hooks are killed so they can't leave the pipeline stuck in "transcribing".
 const HOOK_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// True when a user hook will rewrite the pasted text.
+pub fn exists(app: &AppHandle) -> bool {
+    crate::portable::app_data_dir(app)
+        .map(|d| d.join("hooks").join("transcription").is_file())
+        .unwrap_or(false)
+}
+
 /// Returns the hook's output, or `text` unchanged if there's no hook or it
 /// fails. Dropping the future kills the hook, so callers can cancel it.
 pub async fn apply(app: &AppHandle, text: String) -> String {
