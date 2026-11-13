@@ -447,3 +447,94 @@ fn delayed_final_without_interim_after_completion_keeps_the_last_words() {
     server.join().unwrap();
     assert_eq!(result.unwrap(), "First sentence. The last words.");
 }
+#[test]
+fn server_error_object_and_close_frame_are_classified_with_detail() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let mut ws = accept(listener);
+        read(&mut ws);
+        send(
+            &mut ws,
+            json!({"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"Please retry in 12s."}}),
+        );
+        thread::sleep(Duration::from_millis(300));
+    });
+    let mut live = client(addr);
+    live.audio(&[0.25; 512]).unwrap();
+    let until = Instant::now() + Duration::from_secs(1);
+    let err = loop {
+        if let Err(e) = live.poll() {
+            break e;
+        }
+        assert!(Instant::now() < until);
+    };
+    assert_eq!(err, Error::Quota);
+    let d = resilience::last();
+    assert_eq!(d.status.as_deref(), Some("RESOURCE_EXHAUSTED"));
+    assert_eq!(d.retry_after, Some(Duration::from_secs(12)));
+    server.join().unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let mut ws = accept(listener);
+        read(&mut ws);
+        ws.close(Some(tungstenite::protocol::CloseFrame {
+            code: tungstenite::protocol::frame::coding::CloseCode::Error,
+            reason: "Internal error".into(),
+        }))
+        .unwrap();
+        thread::sleep(Duration::from_millis(300));
+    });
+    let mut live = client(addr);
+    live.audio(&[0.25; 512]).unwrap();
+    let err = loop {
+        if let Err(e) = live.poll() {
+            break e;
+        }
+        assert!(Instant::now() < until + Duration::from_secs(1));
+    };
+    assert_eq!(err, Error::Closed);
+    let d = resilience::last();
+    assert_eq!(d.ws_close, Some(1011));
+    assert_eq!(d.message.as_deref(), Some("Internal error"));
+    server.join().unwrap();
+}
+#[test]
+fn resume_point_moves_only_when_a_turn_final_arrives() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let mut ws = accept(listener);
+        let mut frames = 0;
+        loop {
+            let v = read(&mut ws);
+            if v["realtimeInput"]["activityEnd"].is_object() {
+                assert_eq!(frames, 122);
+                thread::sleep(Duration::from_millis(200));
+                send(
+                    &mut ws,
+                    json!({"serverContent":{"inputTranscription":{"text":"First sentence."}}}),
+                );
+                break;
+            }
+            frames += 1;
+        }
+        thread::sleep(Duration::from_millis(600));
+    });
+    let mut live = client(addr);
+    for i in 0..122 {
+        live.audio(&[if i < 100 { 0.25 } else { 0.0 }; 512])
+            .unwrap();
+        live.poll().unwrap();
+    }
+    // The cut was sent, but no final yet: nothing is safe to skip on replay.
+    assert_eq!(live.resume_point(), (0, ""));
+    let until = Instant::now() + Duration::from_secs(2);
+    while live.resume_point().0 == 0 && Instant::now() < until {
+        live.poll().unwrap();
+    }
+    assert_eq!(live.resume_point(), (122 * 512, "First sentence."));
+    server.join().unwrap();
+}

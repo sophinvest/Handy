@@ -238,3 +238,51 @@ fn previous_sentence_is_context_and_not_part_of_audio() {
         .unwrap()
         .contains("Jean at Sophinvest"));
 }
+
+#[test]
+fn http_failures_carry_class_and_googles_detail() {
+    let cases: [(u16, &'static str, Error); 5] = [
+        (
+            429,
+            r#"{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"Quota exceeded. Please retry in 38.3s.","details":[{"retryDelay":"38s"}]}}"#,
+            Error::Quota,
+        ),
+        (
+            503,
+            r#"{"error":{"code":503,"status":"UNAVAILABLE","message":"The model is overloaded."}}"#,
+            Error::Unavailable,
+        ),
+        (
+            400,
+            r#"{"error":{"code":400,"status":"INVALID_ARGUMENT","message":"Request contains an invalid argument."}}"#,
+            Error::Rejected,
+        ),
+        (
+            400,
+            r#"{"error":{"code":400,"status":"INVALID_ARGUMENT","message":"API key not valid. Please pass a valid API key."}}"#,
+            Error::Auth,
+        ),
+        (403, "not json at all", Error::Auth),
+    ];
+    for (status, body, expected) in cases {
+        let (addr, _rx, h) = server(status, body);
+        resilience::clear();
+        let err = Gemini::at(&addr, TIMEOUT)
+            .unwrap()
+            .transcribe(
+                "fixture-key",
+                "models/gemini-3.5-transcribe",
+                &encode_wav(&[0.1; 160]).unwrap(),
+                &[],
+            )
+            .unwrap_err();
+        assert_eq!(err, expected, "{status} {body}");
+        let d = resilience::last();
+        assert_eq!(d.http, Some(status));
+        if status == 429 {
+            assert_eq!(d.retry_after, Some(Duration::from_secs(38)));
+            assert_eq!(d.status.as_deref(), Some("RESOURCE_EXHAUSTED"));
+        }
+        h.join().unwrap();
+    }
+}

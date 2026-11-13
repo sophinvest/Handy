@@ -8,6 +8,8 @@ use crate::{
 use handy_gemini::{
     live::{append_segment, Live},
     pieces::{Cutter, Limiter, FRAME},
+    resilience::{self, Detail, Diag, RetryState},
+    Error as GeminiError,
 };
 use serde_json::{json, Value};
 #[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
@@ -62,6 +64,141 @@ fn preview(app: &AppHandle, committed: &str, tentative: &str) {
         tentative: tentative.into(),
     }
     .emit(app);
+}
+/// Audio length in ms for the diagnostics line (16 kHz mono).
+fn audio_ms(samples: usize) -> u64 {
+    (samples as u64) * 1000 / 16_000
+}
+/// One structured line per failure, retry or recovery. No key, no transcript text.
+#[allow(clippy::too_many_arguments)]
+fn diag(
+    mode: &str,
+    error: &GeminiError,
+    detail: &Detail,
+    session_age_ms: Option<u128>,
+    samples: usize,
+    state: &RetryState,
+    outcome: &str,
+    wait: Option<Duration>,
+) {
+    log::warn!(
+        "{}",
+        resilience::line(&Diag {
+            mode,
+            error,
+            detail,
+            session_age_ms,
+            audio_ms: audio_ms(samples),
+            attempt: state.attempt(),
+            max_attempts: state.max_attempts(),
+            outcome,
+            wait_ms: wait.map(|w| w.as_millis()),
+        })
+    );
+}
+/// Overlay state while waiting to retry: `google_retry|class|attempt|max|wait_seconds`.
+fn retrying(app: &AppHandle, error: &GeminiError, state: &RetryState, wait: Duration) {
+    engine(
+        app,
+        &format!(
+            "google_retry|{}|{}|{}|{}",
+            error.class(),
+            state.attempt(),
+            state.max_attempts(),
+            wait.as_secs()
+        ),
+    );
+}
+/// Sleep in short steps so a cancelled recording is not held up.
+fn pause(cancel: Option<&AtomicBool>, wait: Duration) -> bool {
+    let end = Instant::now() + wait;
+    while Instant::now() < end {
+        if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50).min(end - Instant::now()));
+    }
+    true
+}
+/// A unary Google call with the SOP-10790 retry policy. The caller has already
+/// counted the first attempt against the request budget; each retry counts again.
+/// The error text names the failure class and how many attempts were made.
+pub fn transcribe_retrying(
+    app: &AppHandle,
+    cancel: Option<&AtomicBool>,
+    mode: &str,
+    samples: usize,
+    restore_state: &str,
+    mut call: impl FnMut() -> Result<String, GeminiError>,
+) -> Result<String, String> {
+    let started = Instant::now();
+    let mut blocked: Option<String> = None;
+    let mut attempts = RetryState::default();
+    let mut first: Option<(GeminiError, Detail)> = None;
+    let result = resilience::run(&mut call, |error, detail, wait, state| {
+        attempts = state.clone();
+        first.get_or_insert_with(|| (error.clone(), detail.clone()));
+        diag(
+            mode,
+            error,
+            detail,
+            Some(started.elapsed().as_millis()),
+            samples,
+            state,
+            "retrying",
+            Some(wait),
+        );
+        retrying(app, error, state, wait);
+        if !pause(cancel, wait) {
+            return false;
+        }
+        // Retries use the same request budget as every other unary call.
+        if let Err(message) = reserve(app) {
+            blocked = Some(message);
+            return false;
+        }
+        true
+    });
+    match result {
+        Ok(text) => {
+            if let Some((error, detail)) = first {
+                diag(
+                    mode,
+                    &error,
+                    &detail,
+                    Some(started.elapsed().as_millis()),
+                    samples,
+                    &attempts,
+                    "recovered",
+                    None,
+                );
+                engine(app, restore_state);
+            }
+            Ok(text)
+        }
+        Err(error) => {
+            let detail = resilience::last();
+            if let Some(message) = blocked {
+                return Err(message);
+            }
+            diag(
+                mode,
+                &error,
+                &detail,
+                Some(started.elapsed().as_millis()),
+                samples,
+                &attempts,
+                "failed_clip_saved",
+                None,
+            );
+            let tries = attempts.attempt();
+            let mut text = resilience::describe(&error, &detail);
+            if tries > 1 {
+                text.push_str(&format!(" (tried {tries} times)"));
+            }
+            Err(text)
+        }
+    }
 }
 pub fn begin(app: &AppHandle) -> Result<crate::audio_toolkit::audio::AudioFrameCallback, String> {
     let mut slot = SESSION.lock().map_err(|_| "Cloud session unavailable")?;
@@ -158,7 +295,7 @@ fn finish_session(
     // finalization queue on release. Deferred quota pieces stay saved for retry.
     let (result, guard) = session
         .result
-        .recv_timeout(Duration::from_secs(25))
+        .recv_timeout(Duration::from_secs(90))
         .map(|(result, guard)| (result, Some(guard)))
         .unwrap_or_else(|_| {
             session.cancel.store(true, Ordering::Release);
@@ -275,6 +412,182 @@ fn can_send(app: &AppHandle, finalizing: bool) -> bool {
         if finalizing { 0 } else { 1 },
     )
 }
+/// Connect a Live session, retrying transient failures per the SOP-10790 policy.
+fn connect_retrying(
+    app: &AppHandle,
+    cancel: &AtomicBool,
+    key: &str,
+    model: &str,
+    words: &[String],
+) -> Result<Live, GeminiError> {
+    let started = Instant::now();
+    let mut first: Option<(GeminiError, Detail)> = None;
+    let mut last_state = RetryState::default();
+    let result = resilience::run(
+        || Live::connect(key, model, words),
+        |error, detail, wait, state| {
+            last_state = state.clone();
+            first.get_or_insert_with(|| (error.clone(), detail.clone()));
+            diag(
+                "live",
+                error,
+                detail,
+                Some(started.elapsed().as_millis()),
+                0,
+                state,
+                "retrying",
+                Some(wait),
+            );
+            retrying(app, error, state, wait);
+            pause(Some(cancel), wait)
+        },
+    );
+    match &result {
+        Ok(_) => {
+            if let Some((error, detail)) = first {
+                diag(
+                    "live",
+                    &error,
+                    &detail,
+                    Some(started.elapsed().as_millis()),
+                    0,
+                    &last_state,
+                    "recovered",
+                    None,
+                );
+            }
+        }
+        Err(error) => {
+            diag(
+                "live",
+                error,
+                &resilience::last(),
+                Some(started.elapsed().as_millis()),
+                0,
+                &last_state,
+                "fallback_pieces",
+                None,
+            );
+        }
+    }
+    result
+}
+/// What a replacement Live session needs from the one that just failed.
+struct ResumePoint {
+    /// First global sample the replacement must replay.
+    from: usize,
+    /// Authoritative text already covering everything before `from`.
+    text: String,
+    age_ms: u128,
+    error: GeminiError,
+    detail: Detail,
+}
+impl ResumePoint {
+    fn of(live: &Live, base: usize, error: &GeminiError) -> Self {
+        let (samples, text) = live.resume_point();
+        Self {
+            from: base + samples,
+            text: text.to_string(),
+            age_ms: live.since.elapsed().as_millis(),
+            error: error.clone(),
+            detail: resilience::last(),
+        }
+    }
+}
+/// Reconnect after a Live failure and replay the audio since the last finalized
+/// turn. On success the finalized text joins `prefix` and the new session starts
+/// at the returned global sample index. `None` means give up (caller falls back).
+fn revive(
+    app: &AppHandle,
+    cancel: &AtomicBool,
+    key: &str,
+    settings: &crate::settings::AppSettings,
+    audio: &[f32],
+    prefix: &mut String,
+    point: ResumePoint,
+) -> Option<(Live, usize)> {
+    let model = settings.gemini_live_model.as_deref()?;
+    let tail = &audio[point.from.min(audio.len())..];
+    let mut state = RetryState::default();
+    let (mut error, mut detail) = (point.error.clone(), point.detail.clone());
+    loop {
+        let Some(wait) = state.next(&error, &detail) else {
+            diag(
+                "live",
+                &error,
+                &detail,
+                Some(point.age_ms),
+                audio.len(),
+                &state,
+                "reconnect_failed",
+                None,
+            );
+            return None;
+        };
+        diag(
+            "live",
+            &error,
+            &detail,
+            Some(point.age_ms),
+            audio.len(),
+            &state,
+            "retrying",
+            Some(wait),
+        );
+        retrying(app, &error, &state, wait);
+        if !pause(Some(cancel), wait) {
+            return None;
+        }
+        resilience::clear();
+        match Live::resume(key, model, &settings.custom_words, tail) {
+            Ok(next) => {
+                diag(
+                    "live",
+                    &error,
+                    &detail,
+                    Some(point.age_ms),
+                    audio.len(),
+                    &state,
+                    "recovered",
+                    None,
+                );
+                append_segment(prefix, &point.text);
+                engine(app, "google_live");
+                preview(app, prefix, "");
+                return Some((next, point.from));
+            }
+            Err(e) => {
+                detail = resilience::last();
+                error = e;
+            }
+        }
+    }
+}
+fn live_failure(error: &GeminiError, mode: &str, age_ms: u128, samples: usize) -> String {
+    live_failure_with(error, &resilience::last(), mode, age_ms, samples)
+}
+fn live_failure_with(
+    error: &GeminiError,
+    detail: &Detail,
+    mode: &str,
+    age_ms: u128,
+    samples: usize,
+) -> String {
+    diag(
+        mode,
+        error,
+        detail,
+        Some(age_ms),
+        samples,
+        &RetryState::default(),
+        "failed_clip_saved",
+        None,
+    );
+    format!(
+        "{}. Live finalization failed; complete recording saved for retry",
+        resilience::describe(error, detail)
+    )
+}
 fn worker(
     app: &AppHandle,
     rx: Receiver<Vec<f32>>,
@@ -296,9 +609,10 @@ fn worker(
             "google_connecting"
         },
     );
+    let mut live_base = 0usize;
     let mut live = if settings.gemini_mode == "auto" {
         match settings.gemini_live_model.as_deref() {
-            Some(m) => match Live::connect(&key, m, &settings.custom_words) {
+            Some(m) => match connect_retrying(app, cancel, &key, m, &settings.custom_words) {
                 Ok(l) => {
                     engine(app, "google_live");
                     Some(l)
@@ -347,8 +661,21 @@ fn worker(
                 received.store(audio.len(), Ordering::Release);
                 if let Some(l) = live.as_mut() {
                     if let Err(e) = l.audio(&frame).and_then(|_| l.poll()) {
+                        let point = ResumePoint::of(l, live_base, &e);
+                        // Reconnect and replay only the audio after the last
+                        // finalized turn; nothing is dropped or repeated.
+                        if let Some((next, base)) =
+                            revive(app, cancel, &key, &settings, &audio, &mut prefix, point)
+                        {
+                            live = Some(next);
+                            live_base = base;
+                            continue;
+                        }
                         if stop.load(Ordering::Acquire) {
-                            return Err(format!("{e}. Clip saved; no release-time backfill"));
+                            return Err(format!(
+                                "{}. Clip saved; no release-time backfill",
+                                resilience::describe(&e, &resilience::last())
+                            ));
                         }
                         log::warn!("gemini_live fallback=pause_pieces reason={}", e);
                         engine(app, "google_pieces");
@@ -398,13 +725,14 @@ fn worker(
                     let next = match l.finish() {
                         Ok(t) => {
                             append_segment(&mut prefix, &t);
-                            settings
-                                .gemini_live_model
-                                .as_deref()
-                                .and_then(|m| Live::connect(&key, m, &settings.custom_words).ok())
+                            settings.gemini_live_model.as_deref().and_then(|m| {
+                                connect_retrying(app, cancel, &key, m, &settings.custom_words).ok()
+                            })
                         }
                         Err(_) => None,
                     };
+                    // The new session's first sample is the next one received.
+                    live_base = audio.len();
                     live = next;
                     if live.is_none() {
                         log::warn!("gemini_live fallback=pause_pieces reason=rollover_failed");
@@ -424,8 +752,19 @@ fn worker(
         }
         if let Some(l) = live.as_mut() {
             if let Err(e) = l.poll() {
+                let point = ResumePoint::of(l, live_base, &e);
+                if let Some((next, base)) =
+                    revive(app, cancel, &key, &settings, &audio, &mut prefix, point)
+                {
+                    live = Some(next);
+                    live_base = base;
+                    continue;
+                }
                 if stop.load(Ordering::Acquire) {
-                    return Err(format!("{e}. Clip saved; no release-time backfill"));
+                    return Err(format!(
+                        "{}. Clip saved; no release-time backfill",
+                        resilience::describe(&e, &resilience::last())
+                    ));
                 }
                 log::warn!("gemini_live fallback=pause_pieces reason={}", e);
                 engine(app, "google_pieces");
@@ -451,9 +790,22 @@ fn worker(
                         return Ok(prefix);
                     }
                     Err(e) => {
-                        return Err(format!(
-                            "{e}. Live finalization failed; complete recording saved for retry"
-                        ))
+                        let detail = resilience::last();
+                        let point = ResumePoint::of(l, live_base, &e);
+                        let age = point.age_ms;
+                        // Reconnect, replay the unfinalized tail, finalize again.
+                        if let Some((mut next, _)) =
+                            revive(app, cancel, &key, &settings, &audio, &mut prefix, point)
+                        {
+                            return match next.finish() {
+                                Ok(t) => {
+                                    append_segment(&mut prefix, &t);
+                                    Ok(prefix)
+                                }
+                                Err(e) => Err(live_failure(&e, "live", age, audio.len())),
+                            };
+                        }
+                        return Err(live_failure_with(&e, &detail, "live", age, audio.len()));
                     }
                 }
             }
@@ -471,15 +823,23 @@ fn worker(
                     finalizing
                 );
                 reserve(app)?;
-                let part = api
-                    .transcribe_context(
-                        &key,
-                        &model,
-                        &wav,
-                        &settings.custom_words,
-                        &handy_gemini::pieces::last_sentence(&text),
-                    )
-                    .map_err(|e| e.to_string())?;
+                let previous = handy_gemini::pieces::last_sentence(&text);
+                let part = transcribe_retrying(
+                    app,
+                    Some(cancel),
+                    "pieces",
+                    boundary,
+                    "google_pieces",
+                    || {
+                        api.transcribe_context(
+                            &key,
+                            &model,
+                            &wav,
+                            &settings.custom_words,
+                            &previous,
+                        )
+                    },
+                )?;
                 append_segment(&mut text, &part);
                 sent = boundary;
                 if let Ok(mut p) = progress.lock() {
@@ -498,9 +858,14 @@ fn worker(
         } else if finalizing {
             reserve(app)?;
             let wav = handy_gemini::encode_wav(&audio).map_err(|e| e.to_string())?;
-            return api
-                .transcribe(&key, &model, &wav, &settings.custom_words)
-                .map_err(|e| e.to_string());
+            return transcribe_retrying(
+                app,
+                Some(cancel),
+                "single",
+                audio.len(),
+                "google_uploading",
+                || api.transcribe(&key, &model, &wav, &settings.custom_words),
+            );
         }
     }
 }

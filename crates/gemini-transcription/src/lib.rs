@@ -1,7 +1,8 @@
 //! Gemini audio transport. No key discovery, model guesses, local inference,
-//! redirects, automatic retries, or billing-project changes.
+//! redirects, or billing-project changes. Retries follow `resilience.rs` only.
 pub mod live;
 pub mod pieces;
+pub mod resilience;
 pub mod secure_file;
 
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -24,15 +25,39 @@ pub enum Error {
     TooLong,
     Empty,
     ModelMissing,
+    /// Google refused the request itself (HTTP 400/404, INVALID_ARGUMENT). Never retried.
+    Rejected,
+    /// The Live socket ended: session limit, GoAway, or an unexpected drop.
+    Closed,
+}
+impl Error {
+    /// Stable lower-case class for the diagnostics line.
+    pub fn class(&self) -> &'static str {
+        match self {
+            Self::Quota => "quota",
+            Self::Offline => "network",
+            Self::Timeout => "timeout",
+            Self::Auth => "auth",
+            Self::Unavailable => "server",
+            Self::InvalidAudio => "invalid_audio",
+            Self::TooLong => "too_long",
+            Self::Empty => "empty",
+            Self::ModelMissing => "model_missing",
+            Self::Rejected => "rejected",
+            Self::Closed => "closed",
+        }
+    }
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::Quota => "Gemini free limit reached",
-            Self::Offline => "Gemini offline or unavailable",
-            Self::Timeout => "Gemini request timed out",
-            Self::Auth => "Gemini key was rejected. Check the key in Settings",
-            Self::Unavailable => "Gemini could not transcribe this clip",
+            Self::Quota => "Google: free-tier limit reached",
+            Self::Offline => "Google: network lost",
+            Self::Timeout => "Google: request timed out",
+            Self::Auth => "Google: key rejected. Check the key in Settings",
+            Self::Unavailable => "Google: service unavailable",
+            Self::Rejected => "Google: request rejected (invalid argument)",
+            Self::Closed => "Google: live connection closed",
             Self::InvalidAudio => "Recording contains invalid audio",
             Self::TooLong => "Each Gemini upload must be five minutes or shorter",
             Self::Empty => "Gemini returned no complete transcript",
@@ -44,6 +69,16 @@ impl fmt::Display for Error {
 }
 impl std::error::Error for Error {}
 fn network(e: reqwest::Error) -> Error {
+    resilience::note(resilience::Detail {
+        message: Some(resilience::sanitize(if e.is_timeout() {
+            "timeout"
+        } else if e.is_connect() {
+            "connect failed"
+        } else {
+            "request failed"
+        })),
+        ..Default::default()
+    });
     if e.is_timeout() {
         Error::Timeout
     } else {
@@ -97,15 +132,29 @@ impl Gemini {
     }
     fn response(response: reqwest::blocking::Response) -> Result<Value, Error> {
         let status = response.status().as_u16();
-        // Never expose Google's error body: it may contain request material.
-        if status == 429 {
-            return Err(Error::Quota);
-        }
-        if status == 401 || status == 403 {
-            return Err(Error::Auth);
-        }
+        // The body is read only for Google's status and message, which pass
+        // through `resilience::sanitize`; it is never logged raw.
         if !(200..300).contains(&status) {
-            return Err(Error::Unavailable);
+            let header = response
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .map(Duration::from_secs);
+            let mut raw = Vec::new();
+            let _ = response.take(16_384).read_to_end(&mut raw);
+            let mut detail = serde_json::from_slice::<Value>(&raw)
+                .map(|b| resilience::google_error(&b))
+                .unwrap_or_default();
+            detail.http = Some(status);
+            detail.retry_after = detail.retry_after.or(header);
+            let error = resilience::classify(
+                Some(status),
+                detail.status.as_deref(),
+                detail.message.as_deref(),
+            );
+            resilience::note(detail);
+            return Err(error);
         }
         let mut bytes = Vec::new();
         response
@@ -227,6 +276,12 @@ fn transcript(body: &Value) -> Result<String, Error> {
     let candidate = &body["candidates"][0];
     // A token-limited partial transcript must not look like a complete dictation.
     if candidate["finishReason"].as_str() != Some("STOP") {
+        resilience::note(resilience::Detail {
+            status: Some(resilience::sanitize(
+                candidate["finishReason"].as_str().unwrap_or("NO_CANDIDATE"),
+            )),
+            ..Default::default()
+        });
         return Err(Error::Empty);
     }
     let parts = candidate["content"]["parts"]

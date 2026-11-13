@@ -783,6 +783,7 @@ pub fn run(cli_args: CliArgs) {
             gemini::gemini_list_clips,
             gemini::gemini_delete_clip,
             gemini::gemini_open_clips,
+            gemini::gemini_diagnostics,
             commands::models::download_language_detector,
             commands::models::is_language_detector_downloaded,
             commands::models::delete_model,

@@ -196,10 +196,15 @@ fn upload(app: &AppHandle, wav: &[u8]) -> Result<String, String> {
         .ok_or("Save your key to verify an available Gemini Transcribe model")?;
     let key = api_key(app)?;
     crate::gemini_stream::reserve(app)?;
-    Gemini::new()
-        .map_err(|e| e.to_string())?
-        .transcribe(&key, &model, wav, &s.custom_words)
-        .map_err(|e| e.to_string())
+    let api = Gemini::new().map_err(|e| e.to_string())?;
+    crate::gemini_stream::transcribe_retrying(
+        app,
+        None,
+        "single_clip",
+        wav.len() / 2,
+        "google_uploading",
+        || api.transcribe(&key, &model, wav, &s.custom_words),
+    )
 }
 /// Returns the saved path as well as the upload result so opt-in local fallback
 /// can remove exactly this pending clip only after producing its transcript.
@@ -253,6 +258,56 @@ pub fn transcribe(
         let _ = app.emit("gemini-clips-changed", ());
     }
     Ok((guard, path, result))
+}
+
+/// Recent Google failure/retry lines from Handy's own log files, newest last.
+/// Only metadata lines are returned: they carry no key and no transcript text.
+#[tauri::command]
+#[specta::specta]
+pub fn gemini_diagnostics(app: AppHandle) -> Result<String, String> {
+    const MARKERS: [&str; 5] = [
+        "gemini_diag",
+        "gemini_live fallback",
+        "gemini_live server_error",
+        "gemini_live socket_closed",
+        "gemini_live finalization_timeout",
+    ];
+    let dir = crate::portable::app_log_dir(&app).map_err(|_| "Cannot locate the log folder")?;
+    let mut files: Vec<PathBuf> = fs::read_dir(&dir)
+        .map_err(|_| "Cannot read the log folder")?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.extension().is_some_and(|x| x == "log")
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("handy"))
+        })
+        .collect();
+    files.sort_by_key(|p| fs::metadata(p).and_then(|m| m.modified()).ok());
+    let mut lines: Vec<String> = Vec::new();
+    for file in files {
+        if let Ok(bytes) = fs::read(&file) {
+            lines.extend(
+                String::from_utf8_lossy(&bytes)
+                    .lines()
+                    .filter(|l| MARKERS.iter().any(|m| l.contains(m)))
+                    .map(str::to_owned),
+            );
+        }
+    }
+    let skip = lines.len().saturating_sub(60);
+    let body = if lines.is_empty() {
+        "(no Google failures logged)".to_string()
+    } else {
+        lines.split_off(skip).join("\n")
+    };
+    Ok(format!(
+        "Handy {} ({})\nLog folder: {}\n{}",
+        app.package_info().version,
+        std::env::consts::OS,
+        dir.display(),
+        body
+    ))
 }
 
 #[derive(Serialize, specta::Type)]
@@ -432,16 +487,17 @@ fn recover_text(app: &AppHandle, path: &std::path::Path) -> Result<String, Strin
         let key = api_key(app)?;
         let model = s.gemini_model.ok_or("Verify your key first")?;
         crate::gemini_stream::reserve(app)?;
-        let part = Gemini::new()
-            .map_err(|e| e.to_string())?
-            .transcribe_context(
-                &key,
-                &model,
-                &encoded,
-                &s.custom_words,
-                &handy_gemini::pieces::last_sentence(&progress.text),
-            )
-            .map_err(|e| failed(app, e))?;
+        let api = Gemini::new().map_err(|e| e.to_string())?;
+        let previous = handy_gemini::pieces::last_sentence(&progress.text);
+        let part = crate::gemini_stream::transcribe_retrying(
+            app,
+            None,
+            "retry_clip",
+            cut,
+            "google_pieces",
+            || api.transcribe_context(&key, &model, &encoded, &s.custom_words, &previous),
+        )
+        .map_err(|e| failed(app, e))?;
         handy_gemini::live::append_segment(&mut progress.text, &part);
         progress.offset += cut;
         // Recovery updates are atomic and private, just like the saved WAV.

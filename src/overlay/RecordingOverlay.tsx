@@ -1,6 +1,7 @@
 import { listen } from "@tauri-apps/api/event";
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import "./RecordingOverlay.css";
 import { commands, events } from "@/bindings";
 import type {
@@ -23,6 +24,26 @@ type OverlayState =
   | "processing"
   | "notice"
   | "live_notice";
+
+// The backend sends `google_retry|class|attempt|max|wait_seconds` while it
+// reconnects or resends after a transient Google failure (SOP-10790).
+const engineLabel = (t: TFunction, engine: string) => {
+  if (engine.startsWith("google_retry|")) {
+    const [, reason, attempt, max, wait] = engine.split("|");
+    return t(
+      Number(wait) >= 3
+        ? "gemini.engine.google_retry_wait"
+        : "gemini.engine.google_retry",
+      {
+        reason: t(`gemini.retryReason.${reason}`, { defaultValue: reason }),
+        attempt,
+        max,
+        seconds: wait,
+      },
+    );
+  }
+  return t(`gemini.engine.${engine}`);
+};
 
 const isNoticeState = (state: OverlayState) =>
   state === "notice" || state === "live_notice";
@@ -343,7 +364,7 @@ const RecordingOverlay: React.FC = () => {
         </span>
       ) : (
         <span className="sengine" data-engine={engine}>
-          {t(`gemini.engine.${engine}`)}
+          {engineLabel(t, engine)}
         </span>
       )}
       <div className="sbase-r">
@@ -361,7 +382,7 @@ const RecordingOverlay: React.FC = () => {
         <span className="sspinner" />
       </div>
       <span className="swork-label">
-        {engine.startsWith("google_") ? t(`gemini.engine.${engine}`) : label}
+        {engine.startsWith("google_") ? engineLabel(t, engine) : label}
       </span>
       <div className="sbase-r">{showCancel && cancelBtn}</div>
     </div>

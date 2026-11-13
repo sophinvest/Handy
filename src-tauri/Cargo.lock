@@ -2511,7 +2511,7 @@ dependencies = [
 
 [[package]]
 name = "handy"
-version = "0.10.0-gemini.8"
+version = "0.10.0-gemini.9"
 dependencies = [
  "anyhow",
  "chrono",

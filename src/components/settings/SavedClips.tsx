@@ -156,6 +156,31 @@ export const SavedClips: React.FC<{ disabled: boolean; canRetry: boolean }> = ({
       >
         {t("gemini.openClips")}
       </button>
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          className="border border-line rounded px-3 py-2"
+          disabled={disabled || working}
+          onClick={() =>
+            run(async () => {
+              const text = await invoke<string>("gemini_diagnostics");
+              await navigator.clipboard.writeText(text);
+            }, t("gemini.diagnosticsCopied"))
+          }
+        >
+          {t("gemini.copyDiagnostics")}
+        </button>
+        <button
+          className="border border-line rounded px-3 py-2"
+          disabled={disabled || working}
+          onClick={() =>
+            run(async () => {
+              await invoke("open_log_dir");
+            })
+          }
+        >
+          {t("gemini.openLogFolder")}
+        </button>
+      </div>
       <p role="status" className="text-sm whitespace-pre-wrap">
         {working ? t("gemini.working") : message}
       </p>

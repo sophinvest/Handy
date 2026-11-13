@@ -771,6 +771,10 @@ async geminiDeleteClip(clipId: string) : Promise<Result<null, string>> {
     try { return { status: "ok", data: await TAURI_INVOKE("gemini_delete_clip", { clipId }) }; }
     catch (e) { if(e instanceof Error) throw e; else return { status: "error", error: e as any }; }
 },
+async geminiDiagnostics() : Promise<Result<string, string>> {
+    try { return { status: "ok", data: await TAURI_INVOKE("gemini_diagnostics") }; }
+    catch (e) { if(e instanceof Error) throw e; else return { status: "error", error: e as any }; }
+},
 async geminiOpenClips() : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("gemini_open_clips") };

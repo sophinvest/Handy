@@ -1052,7 +1052,9 @@
       "google_live": "● Google live",
       "google_pieces": "Google: pause pieces",
       "google_uploading": "Google: uploading",
-      "google_error": "Google: error"
+      "google_error": "Google: error",
+      "google_retry": "Google: {{reason}} — retrying ({{attempt}}/{{max}})",
+      "google_retry_wait": "Google: {{reason}} — retrying in {{seconds}} s ({{attempt}}/{{max}})"
     },
     "retryClip": "Retry",
     "deleteClip": "Delete",
@@ -1063,6 +1065,16 @@
     "retryHint": "Retry uploads only the selected clip. Text uses your dictation output settings. For paste, Handy hides this window to return to your previous application. You can also use the retry shortcut in your target application.",
     "delivered": "Text delivered using your dictation output settings.",
     "deleted": "Saved clip deleted.",
-    "listError": "Could not refresh saved clips. Try opening this panel again."
+    "listError": "Could not refresh saved clips. Try opening this panel again.",
+    "retryReason": {
+      "network": "network lost",
+      "timeout": "request timed out",
+      "closed": "live connection closed",
+      "server": "service unavailable",
+      "quota": "free-tier limit reached"
+    },
+    "copyDiagnostics": "Copy diagnostics",
+    "diagnosticsCopied": "Recent Google failure lines copied. Paste them into a message.",
+    "openLogFolder": "Open log folder"
   }
 }

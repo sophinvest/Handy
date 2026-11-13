@@ -1,4 +1,4 @@
-// ALGORITHM VERSION 1.1 — 2026-11-13 (Live turn cadence; pause/energy rules live in pieces.rs)
+// ALGORITHM VERSION 1.2 — 2026-11-13 (Live turn cadence; pause/energy rules live in pieces.rs)
 // 1. Recording owns the Google turn (manual activity); send every sample exactly once.
 // 2. After at least 3 s of turn audio and 0.7 s of detected quiet, send activityEnd.
 // 3. Queue all audio (speech and silence) until Google's final arrives, then activityStart
@@ -6,9 +6,14 @@
 // 4. Finals therefore arrive phrase by phrase and only the current phrase stays provisional.
 // v1.0 — SOP-10742: 30 s minimum / 0.4 s quiet (whole 30 s stayed underlined).
 // v1.1 — SOP-10774: 3 s minimum / 0.7 s quiet for Live; pieces mode keeps 30/60/90 s.
+// 5. Resume point: when a turn's final arrives, remember how many samples and how much
+//    committed text that final covers. If the socket then fails, the caller reconnects,
+//    keeps only that text and replays only the audio after those samples (no word is
+//    dropped or repeated). Failure classes and retries live in resilience.rs.
+// v1.2 — SOP-10790: resume point, specific failure classes, connect/close detail.
 //! Dedicated Transcribe Live socket, with bounded network waits and no key in
 //! the URL or errors. It never pastes or owns the microphone.
-use crate::{Error, TIMEOUT};
+use crate::{resilience, Error, TIMEOUT};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
 use std::{
@@ -23,6 +28,8 @@ const URL: &str = "wss://generativelanguage.googleapis.com/ws/google.ai.generati
 pub const LIVE_MIN_TURN_MS: u32 = 3000;
 pub const LIVE_QUIET_MS: u32 = 700;
 const FINAL_TIMEOUT: Duration = Duration::from_millis(1500);
+/// Pause between replayed 32 ms frames when resuming a session.
+const REPLAY_PACE: Duration = Duration::from_millis(4);
 pub fn valid_model(name: &str) -> bool {
     name.starts_with("models/gemini-")
         && name.contains("transcribe")
@@ -30,6 +37,88 @@ pub fn valid_model(name: &str) -> bool {
         && name
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || b"/-._".contains(&c))
+}
+fn offline(message: &str) -> Error {
+    resilience::note(resilience::Detail {
+        message: Some(message.into()),
+        ..Default::default()
+    });
+    Error::Offline
+}
+fn io_failure(what: &str, e: &std::io::Error) -> Error {
+    if matches!(
+        e.kind(),
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+    ) {
+        resilience::note(resilience::Detail {
+            message: Some(format!("{what}: timed out")),
+            ..Default::default()
+        });
+        return Error::Timeout;
+    }
+    offline(&format!("{what}: {:?}", e.kind()))
+}
+fn handshake_failure(e: tungstenite::Error) -> Error {
+    match e {
+        tungstenite::Error::Http(response) => {
+            let status = response.status().as_u16();
+            let body = response
+                .body()
+                .as_deref()
+                .and_then(|b| serde_json::from_slice::<Value>(b).ok())
+                .map(|b| resilience::google_error(&b))
+                .unwrap_or_default();
+            let error = resilience::classify(
+                Some(status),
+                body.status.as_deref(),
+                body.message.as_deref(),
+            );
+            resilience::note(resilience::Detail {
+                http: Some(status),
+                ..body
+            });
+            error
+        }
+        tungstenite::Error::Io(e) => io_failure("websocket handshake failed", &e),
+        _ => offline("websocket handshake failed"),
+    }
+}
+/// A Live error object (`{"error":{...}}`) delivered as a socket message.
+fn server_error(v: &Value) -> Error {
+    let detail = resilience::google_error(v);
+    let error = resilience::classify(
+        detail.http,
+        detail.status.as_deref(),
+        detail.message.as_deref(),
+    );
+    log::warn!(
+        "gemini_live server_error code={} status={}",
+        detail.http.unwrap_or(0),
+        detail.status.as_deref().unwrap_or("-")
+    );
+    resilience::note(detail);
+    error
+}
+fn socket_failure(e: tungstenite::Error) -> Error {
+    match e {
+        tungstenite::Error::Io(e) => io_failure("socket error", &e),
+        tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed => {
+            resilience::note(resilience::Detail {
+                ws_close: Some(1006),
+                message: Some("socket closed without a close frame".into()),
+                ..Default::default()
+            });
+            Error::Closed
+        }
+        _ => offline("websocket protocol error"),
+    }
+}
+fn final_timeout() -> Error {
+    resilience::note(resilience::Detail {
+        message: Some("no final transcript within 1.5 s".into()),
+        ..Default::default()
+    });
+    Error::Timeout
 }
 #[derive(Default, Clone, Debug)]
 pub struct Text {
@@ -75,7 +164,9 @@ pub struct Live {
     partials: usize,
     finals: usize,
     pause_cutter: crate::pieces::Cutter,
-    boundary_wait: Option<(usize, Instant)>,
+    boundary_wait: Option<(usize, Instant, usize)>,
+    safe_samples: usize,
+    safe_text: usize,
     turn_needs_final: bool,
     pending_audio: VecDeque<Vec<f32>>,
 }
@@ -84,22 +175,29 @@ impl Live {
         if !valid_model(model) {
             return Err(Error::ModelMissing);
         }
+        resilience::clear();
         let addr = (HOST, 443)
             .to_socket_addrs()
-            .map_err(|_| Error::Offline)?
+            .map_err(|e| io_failure("dns lookup failed", &e))?
             .next()
-            .ok_or(Error::Offline)?;
-        let tcp = TcpStream::connect_timeout(&addr, TIMEOUT).map_err(|_| Error::Offline)?;
+            .ok_or_else(|| offline("dns returned no address"))?;
+        let tcp = TcpStream::connect_timeout(&addr, TIMEOUT)
+            .map_err(|e| io_failure("tcp connect failed", &e))?;
         tcp.set_read_timeout(Some(TIMEOUT))
-            .map_err(|_| Error::Offline)?;
+            .map_err(|e| io_failure("socket setup failed", &e))?;
         tcp.set_write_timeout(Some(TIMEOUT))
-            .map_err(|_| Error::Offline)?;
+            .map_err(|e| io_failure("socket setup failed", &e))?;
         let mut request = URL.into_client_request().map_err(|_| Error::Unavailable)?;
         request
             .headers_mut()
             .insert("x-goog-api-key", key.parse().map_err(|_| Error::Auth)?);
-        let (socket, _) = tungstenite::client_tls_with_config(request, tcp, None, None)
-            .map_err(|_| Error::Unavailable)?;
+        let (socket, _) =
+            tungstenite::client_tls_with_config(request, tcp, None, None).map_err(|e| match e {
+                tungstenite::HandshakeError::Failure(e) => handshake_failure(e),
+                tungstenite::HandshakeError::Interrupted(_) => {
+                    offline("websocket handshake interrupted")
+                }
+            })?;
         Self::setup(socket, model, words)
     }
     fn setup(
@@ -118,6 +216,8 @@ impl Live {
             finals: 0,
             pause_cutter: crate::pieces::Cutter::with_millis(LIVE_MIN_TURN_MS, LIVE_QUIET_MS),
             boundary_wait: None,
+            safe_samples: 0,
+            safe_text: 0,
             turn_needs_final: false,
             pending_audio: VecDeque::new(),
         };
@@ -127,6 +227,10 @@ impl Live {
         let until = Instant::now() + TIMEOUT;
         loop {
             if Instant::now() >= until {
+                resilience::note(resilience::Detail {
+                    message: Some("setupComplete not received within 10 s".into()),
+                    ..Default::default()
+                });
                 return Err(Error::Timeout);
             }
             let Some(body) = this.receive()? else {
@@ -164,12 +268,12 @@ impl Live {
     fn send(&mut self, value: Value) -> Result<(), Error> {
         self.socket
             .send(Message::Text(value.to_string().into()))
-            .map_err(|_| Error::Offline)
+            .map_err(socket_failure)
     }
     pub fn audio(&mut self, samples: &[f32]) -> Result<(), Error> {
-        if let Some((_, deadline)) = self.boundary_wait {
+        if let Some((_, deadline, _)) = self.boundary_wait {
             if Instant::now() >= deadline {
-                return Err(Error::Timeout);
+                return Err(final_timeout());
             }
             // Keep onset and silence alike while the previous turn finalizes.
             // Starting the next turn earlier caused real Google audio loss.
@@ -191,7 +295,7 @@ impl Live {
         // Every sample is sent exactly once before a boundary at a real pause.
         if self.pause_cutter.push(samples, speech).is_some() {
             self.send(json!({"realtimeInput":{"activityEnd":{}}}))?;
-            self.boundary_wait = Some((self.finals, Instant::now() + FINAL_TIMEOUT));
+            self.boundary_wait = Some((self.finals, Instant::now() + FINAL_TIMEOUT, self.samples));
             log::info!(
                 "gemini_live pause_boundary frames={} samples={}",
                 self.frames,
@@ -213,15 +317,7 @@ impl Live {
             Ok(Message::Binary(t)) => {
                 let v: Value = serde_json::from_slice(&t).map_err(|_| Error::Unavailable)?;
                 if v.get("error").is_some() {
-                    log::warn!(
-                        "gemini_live server_error code={}",
-                        v["error"]["code"].as_u64().unwrap_or(0)
-                    );
-                    return Err(if v["error"]["code"] == 429 {
-                        Error::Quota
-                    } else {
-                        Error::Unavailable
-                    });
+                    return Err(server_error(&v));
                 }
                 self.go_away |= v.get("goAway").is_some();
                 self.accept(&v);
@@ -230,26 +326,23 @@ impl Live {
             Ok(Message::Text(t)) => {
                 let v: Value = serde_json::from_str(&t).map_err(|_| Error::Unavailable)?;
                 if v.get("error").is_some() {
-                    log::warn!(
-                        "gemini_live server_error code={}",
-                        v["error"]["code"].as_u64().unwrap_or(0)
-                    );
-                    return Err(if v["error"]["code"] == 429 {
-                        Error::Quota
-                    } else {
-                        Error::Unavailable
-                    });
+                    return Err(server_error(&v));
                 }
                 self.go_away |= v.get("goAway").is_some();
                 self.accept(&v);
                 Ok(Some(v))
             }
             Ok(Message::Close(frame)) => {
-                log::warn!(
-                    "gemini_live socket_closed code={}",
-                    frame.map(|f| u16::from(f.code)).unwrap_or(1005)
-                );
-                Err(Error::Offline)
+                let code = frame.as_ref().map(|f| u16::from(f.code)).unwrap_or(1005);
+                let reason = frame.map(|f| f.reason.to_string()).unwrap_or_default();
+                log::warn!("gemini_live socket_closed code={}", code);
+                let error = resilience::classify_close(code, &reason);
+                resilience::note(resilience::Detail {
+                    ws_close: Some(code),
+                    message: (!reason.is_empty()).then(|| resilience::sanitize(&reason)),
+                    ..Default::default()
+                });
+                Err(error)
             }
             Ok(_) => Ok(None),
             Err(tungstenite::Error::Io(e))
@@ -260,7 +353,7 @@ impl Live {
             {
                 Ok(None)
             }
-            Err(_) => Err(Error::Offline),
+            Err(e) => Err(socket_failure(e)),
         }
     }
     fn accept(&mut self, v: &Value) {
@@ -293,13 +386,16 @@ impl Live {
                 break;
             }
         }
-        if let Some((baseline, deadline)) = self.boundary_wait {
+        if let Some((baseline, deadline, cut)) = self.boundary_wait {
             if self.finals > baseline && self.text.tentative.is_empty() {
                 self.boundary_wait = None;
+                // Everything up to this cut now has authoritative text.
+                self.safe_samples = cut;
+                self.safe_text = self.text.committed.len();
                 self.send(json!({"realtimeInput":{"activityStart":{}}}))?;
                 while let Some(frame) = self.pending_audio.pop_front() {
                     if Instant::now() >= deadline {
-                        return Err(Error::Timeout);
+                        return Err(final_timeout());
                     }
                     self.audio(&frame)?;
                 }
@@ -309,10 +405,29 @@ impl Live {
                     self.samples
                 );
             } else if Instant::now() >= deadline {
-                return Err(Error::Timeout);
+                return Err(final_timeout());
             }
         }
         Ok(())
+    }
+    /// Samples (counted from this connection's start) and committed text that are
+    /// final. Audio after `.0` is the only audio a replacement session must replay.
+    pub fn resume_point(&self) -> (usize, &str) {
+        (self.safe_samples, &self.text.committed[..self.safe_text])
+    }
+    /// Open a replacement session and replay `tail` (the audio after the old
+    /// session's resume point). Fails the same way a live session would.
+    pub fn resume(key: &str, model: &str, words: &[String], tail: &[f32]) -> Result<Self, Error> {
+        let mut live = Self::connect(key, model, words)?;
+        for frame in tail.chunks(crate::pieces::FRAME) {
+            live.audio(frame)?;
+            live.poll()?;
+            // Real Google finals fall behind audio sent with no pacing (measured:
+            // an 11 s clip replayed in 1.3 s never finalized in time; at about
+            // 4 ms per 32 ms frame, roughly 5x real time, it always did).
+            std::thread::sleep(REPLAY_PACE);
+        }
+        Ok(live)
     }
     pub fn finish(&mut self) -> Result<String, Error> {
         let started = Instant::now();
@@ -332,7 +447,7 @@ impl Live {
             if let Err(e) = self.poll() {
                 // A server may close immediately after its authoritative final.
                 // There can be nothing more to drain once that socket closes.
-                if e == Error::Offline
+                if matches!(e, Error::Offline | Error::Closed)
                     && self.finals > 0
                     && self.text.tentative.is_empty()
                     && self.boundary_wait.is_none()
@@ -393,7 +508,7 @@ impl Live {
             "gemini_live finalization_timeout release_ms={}; clip preserved, no whole-file upload",
             started.elapsed().as_millis()
         );
-        Err(Error::Timeout)
+        Err(final_timeout())
     }
 }
 #[cfg(test)]
