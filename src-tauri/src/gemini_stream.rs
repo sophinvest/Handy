@@ -501,12 +501,13 @@ fn revive(
     app: &AppHandle,
     cancel: &AtomicBool,
     key: &str,
-    settings: &crate::settings::AppSettings,
+    model: Option<&str>,
+    words: &[String],
     audio: &[f32],
     prefix: &mut String,
     point: ResumePoint,
 ) -> Option<(Live, usize)> {
-    let model = settings.gemini_live_model.as_deref()?;
+    let model = model?;
     let tail = &audio[point.from.min(audio.len())..];
     let mut state = RetryState::default();
     let (mut error, mut detail) = (point.error.clone(), point.detail.clone());
@@ -539,7 +540,7 @@ fn revive(
             return None;
         }
         resilience::clear();
-        match Live::resume(key, model, &settings.custom_words, tail) {
+        match Live::resume(key, model, words, tail) {
             Ok(next) => {
                 diag(
                     "live",
@@ -664,9 +665,16 @@ fn worker(
                         let point = ResumePoint::of(l, live_base, &e);
                         // Reconnect and replay only the audio after the last
                         // finalized turn; nothing is dropped or repeated.
-                        if let Some((next, base)) =
-                            revive(app, cancel, &key, &settings, &audio, &mut prefix, point)
-                        {
+                        if let Some((next, base)) = revive(
+                            app,
+                            cancel,
+                            &key,
+                            settings.gemini_live_model.as_deref(),
+                            &settings.custom_words,
+                            &audio,
+                            &mut prefix,
+                            point,
+                        ) {
                             live = Some(next);
                             live_base = base;
                             continue;
@@ -753,9 +761,16 @@ fn worker(
         if let Some(l) = live.as_mut() {
             if let Err(e) = l.poll() {
                 let point = ResumePoint::of(l, live_base, &e);
-                if let Some((next, base)) =
-                    revive(app, cancel, &key, &settings, &audio, &mut prefix, point)
-                {
+                if let Some((next, base)) = revive(
+                    app,
+                    cancel,
+                    &key,
+                    settings.gemini_live_model.as_deref(),
+                    &settings.custom_words,
+                    &audio,
+                    &mut prefix,
+                    point,
+                ) {
                     live = Some(next);
                     live_base = base;
                     continue;
@@ -794,9 +809,16 @@ fn worker(
                         let point = ResumePoint::of(l, live_base, &e);
                         let age = point.age_ms;
                         // Reconnect, replay the unfinalized tail, finalize again.
-                        if let Some((mut next, _)) =
-                            revive(app, cancel, &key, &settings, &audio, &mut prefix, point)
-                        {
+                        if let Some((mut next, _)) = revive(
+                            app,
+                            cancel,
+                            &key,
+                            settings.gemini_live_model.as_deref(),
+                            &settings.custom_words,
+                            &audio,
+                            &mut prefix,
+                            point,
+                        ) {
                             return match next.finish() {
                                 Ok(t) => {
                                     append_segment(&mut prefix, &t);
