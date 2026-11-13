@@ -1,12 +1,15 @@
-// ALGORITHM VERSION 1.0 — 2026-11-12
+// ALGORITHM VERSION 1.1 — 2026-11-13
 // 1. Treat a 32 ms frame above -40 dB RMS as speech; retain every sample regardless.
-// 2. Wait for the 30/60/90 second minimum and 0.4 s quiet before a cut.
+// 2. Pieces mode: wait for the 30/60/90 second minimum and 0.4 s quiet before a cut.
+//    Live mode (live.rs): wait for a 3 s minimum turn and 0.7 s quiet, so Google
+//    finalizes phrase by phrase and only the newest words stay provisional.
 // 3. Never force a boundary in continuous speech; each sample belongs to one piece.
 // 4. Unary requests need known minute/day caps; retain audio when capacity is missing.
 // 5. Reserve one request during capture for release/retry; reset daily counts in Pacific time.
 // A conservative energy gate replaces neural VAD so cloud mode loads no local model.
 // It may delay a cut in noise; it must never discard or shorten the original recording.
 // v1.0 — SOP-10742: model-free pause signal shared by capture and manual recovery.
+// v1.1 — SOP-10774: Cutter takes its own minimum/quiet; Live uses 3 s / 0.7 s, pieces keep 30-90 s / 0.4 s.
 pub fn is_speech(frame: &[f32]) -> bool {
     !frame.is_empty() && frame.iter().map(|s| s * s).sum::<f32>() / frame.len() as f32 > 0.0001
 }
@@ -22,6 +25,7 @@ pub struct Cutter {
     since: usize,
     quiet: usize,
     target: usize,
+    quiet_needed: usize,
 }
 impl Default for Cutter {
     fn default() -> Self {
@@ -34,6 +38,17 @@ impl Cutter {
             since: 0,
             quiet: 0,
             target: target_seconds.clamp(30, 90) as usize * RATE,
+            quiet_needed: RATE * 4 / 10,
+        }
+    }
+    /// A short-turn cutter (Live phrases): `min_ms` of audio, then `quiet_ms`
+    /// of detected non-speech. Same sample-exact, never-force-a-cut rules.
+    pub fn with_millis(min_ms: u32, quiet_ms: u32) -> Self {
+        Self {
+            since: 0,
+            quiet: 0,
+            target: min_ms as usize * RATE / 1000,
+            quiet_needed: (quiet_ms as usize * RATE / 1000).max(1),
         }
     }
     /// Return the end of at least 0.4 seconds of detected non-speech, after
@@ -42,7 +57,7 @@ impl Cutter {
     pub fn push(&mut self, frame: &[f32], speech: bool) -> Option<usize> {
         self.since += frame.len();
         self.quiet = if speech { 0 } else { self.quiet + frame.len() };
-        if self.since >= self.target && self.quiet >= RATE * 4 / 10 {
+        if self.since >= self.target && self.quiet >= self.quiet_needed {
             let cut = self.since;
             self.since = 0;
             self.quiet = 0;
@@ -140,6 +155,36 @@ mod tests {
                 Some((speech_frames + 13) * FRAME)
             );
         }
+    }
+    #[test]
+    fn live_phrase_cutter_cuts_after_short_turn_and_longer_quiet_only() {
+        let mut c = Cutter::with_millis(3000, 700);
+        // 2.9 s of speech is below the minimum turn, even with a long pause after.
+        for _ in 0..90 {
+            assert_eq!(c.push(&[0.1; FRAME], true), None);
+        }
+        for _ in 0..3 {
+            assert_eq!(c.push(&[0.0; FRAME], false), None);
+        }
+        // Minimum reached, but 0.7 s (22 frames) of quiet is still required.
+        let mut cut = None;
+        let mut quiet_frames = 3;
+        while cut.is_none() {
+            quiet_frames += 1;
+            cut = c.push(&[0.0; FRAME], false);
+        }
+        assert_eq!(quiet_frames, 22);
+        assert_eq!(cut, Some((90 + 22) * FRAME));
+        // Speech resets the quiet counter.
+        let mut c = Cutter::with_millis(3000, 700);
+        for _ in 0..100 {
+            c.push(&[0.1; FRAME], true);
+        }
+        for _ in 0..21 {
+            assert_eq!(c.push(&[0.0; FRAME], false), None);
+        }
+        assert_eq!(c.push(&[0.1; FRAME], true), None);
+        assert_eq!(c.push(&[0.0; FRAME], false), None);
     }
     #[test]
     fn brief_pauses_before_target_do_not_send_and_partition_preserves_repetitions() {

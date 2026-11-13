@@ -196,7 +196,7 @@ fn pause_boundary_finalizes_during_capture_without_losing_or_repeating_samples()
             if v["realtimeInput"]["activityEnd"].is_object() {
                 ends += 1;
                 if ends == 1 {
-                    assert_eq!(frames, 951);
+                    assert_eq!(frames, 122);
                     thread::sleep(Duration::from_millis(300));
                     send(
                         &mut ws,
@@ -205,7 +205,7 @@ fn pause_boundary_finalizes_during_capture_without_losing_or_repeating_samples()
                     assert!(read(&mut ws)["realtimeInput"]["activityStart"].is_object());
                 } else {
                     assert_eq!(ends, 2);
-                    assert_eq!(frames, 982);
+                    assert_eq!(frames, 153);
                     send(
                         &mut ws,
                         json!({"serverContent":{"inputTranscription":{"text":"Second sentence."}}}),
@@ -218,9 +218,9 @@ fn pause_boundary_finalizes_during_capture_without_losing_or_repeating_samples()
             let pcm = STANDARD
                 .decode(v["realtimeInput"]["audio"]["data"].as_str().unwrap())
                 .unwrap();
-            let value: f32 = if frames < 938 {
+            let value: f32 = if frames < 100 {
                 0.25
-            } else if frames < 951 {
+            } else if frames < 122 {
                 0.0
             } else {
                 0.5
@@ -232,10 +232,10 @@ fn pause_boundary_finalizes_during_capture_without_losing_or_repeating_samples()
         }
     });
     let mut live = client(addr);
-    for i in 0..982 {
-        let value = if i < 938 {
+    for i in 0..153 {
+        let value = if i < 100 {
             0.25
-        } else if i < 951 {
+        } else if i < 122 {
             0.0
         } else {
             0.5
@@ -254,7 +254,7 @@ fn pause_next_turn_missing_final_never_pastes_the_previous_turn() {
     let addr = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
         let mut ws = accept(listener);
-        for _ in 0..951 {
+        for _ in 0..122 {
             assert!(read(&mut ws)["realtimeInput"]["audio"].is_object());
         }
         assert!(read(&mut ws)["realtimeInput"]["activityEnd"].is_object());
@@ -270,8 +270,8 @@ fn pause_next_turn_missing_final_never_pastes_the_previous_turn() {
         thread::sleep(Duration::from_millis(1800));
     });
     let mut live = client(addr);
-    for i in 0..982 {
-        live.audio(&[if (938..951).contains(&i) { 0.0 } else { 0.25 }; 512])
+    for i in 0..153 {
+        live.audio(&[if (100..122).contains(&i) { 0.0 } else { 0.25 }; 512])
             .unwrap();
         live.poll().unwrap();
     }

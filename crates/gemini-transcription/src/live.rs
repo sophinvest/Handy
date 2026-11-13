@@ -1,3 +1,11 @@
+// ALGORITHM VERSION 1.1 — 2026-11-13 (Live turn cadence; pause/energy rules live in pieces.rs)
+// 1. Recording owns the Google turn (manual activity); send every sample exactly once.
+// 2. After at least 3 s of turn audio and 0.7 s of detected quiet, send activityEnd.
+// 3. Queue all audio (speech and silence) until Google's final arrives, then activityStart
+//    and flush in order; bounded to 1.5 s, release shares that deadline.
+// 4. Finals therefore arrive phrase by phrase and only the current phrase stays provisional.
+// v1.0 — SOP-10742: 30 s minimum / 0.4 s quiet (whole 30 s stayed underlined).
+// v1.1 — SOP-10774: 3 s minimum / 0.7 s quiet for Live; pieces mode keeps 30/60/90 s.
 //! Dedicated Transcribe Live socket, with bounded network waits and no key in
 //! the URL or errors. It never pastes or owns the microphone.
 use crate::{Error, TIMEOUT};
@@ -11,6 +19,9 @@ use std::{
 use tungstenite::{client::IntoClientRequest, stream::MaybeTlsStream, Message, WebSocket};
 const HOST: &str = "generativelanguage.googleapis.com";
 const URL: &str = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
+/// Live phrase cadence (SOP-10774): minimum turn length and required quiet.
+pub const LIVE_MIN_TURN_MS: u32 = 3000;
+pub const LIVE_QUIET_MS: u32 = 700;
 const FINAL_TIMEOUT: Duration = Duration::from_millis(1500);
 pub fn valid_model(name: &str) -> bool {
     name.starts_with("models/gemini-")
@@ -105,7 +116,7 @@ impl Live {
             samples: 0,
             partials: 0,
             finals: 0,
-            pause_cutter: crate::pieces::Cutter::new(30),
+            pause_cutter: crate::pieces::Cutter::with_millis(LIVE_MIN_TURN_MS, LIVE_QUIET_MS),
             boundary_wait: None,
             turn_needs_final: false,
             pending_audio: VecDeque::new(),
