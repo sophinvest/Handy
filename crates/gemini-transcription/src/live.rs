@@ -1,4 +1,4 @@
-// ALGORITHM VERSION 1.2 — 2026-11-13 (Live turn cadence; pause/energy rules live in pieces.rs)
+// ALGORITHM VERSION 1.3 — 2026-11-13 (Live turn cadence; pause/energy rules live in pieces.rs)
 // 1. Recording owns the Google turn (manual activity); send every sample exactly once.
 // 2. After at least 3 s of turn audio and 0.7 s of detected quiet, send activityEnd.
 // 3. Queue all audio (speech and silence) until Google's final arrives, then activityStart
@@ -11,6 +11,9 @@
 //    keeps only that text and replays only the audio after those samples (no word is
 //    dropped or repeated). Failure classes and retries live in resilience.rs.
 // v1.2 — SOP-10790: resume point, specific failure classes, connect/close detail.
+// 6. A turn that held no detected speech is never ended: Google sends no final for it, so
+//    the 1.5 s wait would time out and Live would drop on any pause over ~3 s.
+// v1.3 — SOP-10793: silence-only turns stay open; fallback keeps the overlay text.
 //! Dedicated Transcribe Live socket, with bounded network waits and no key in
 //! the URL or errors. It never pastes or owns the microphone.
 use crate::{resilience, Error, TIMEOUT};
@@ -293,7 +296,9 @@ impl Live {
         // Reuse the narrated model-free pause algorithm in pieces.rs. A long
         // recording must not become one enormous unfinished server utterance.
         // Every sample is sent exactly once before a boundary at a real pause.
-        if self.pause_cutter.push(samples, speech).is_some() {
+        // A silence-only turn has nothing to finalize: Google sends no final for it,
+        // so ending it would time out and drop Live (SOP-10793). Keep it open.
+        if self.pause_cutter.push(samples, speech).is_some() && self.turn_needs_final {
             self.send(json!({"realtimeInput":{"activityEnd":{}}}))?;
             self.boundary_wait = Some((self.finals, Instant::now() + FINAL_TIMEOUT, self.samples));
             log::info!(

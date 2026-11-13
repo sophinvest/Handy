@@ -278,6 +278,42 @@ fn pause_next_turn_missing_final_never_pastes_the_previous_turn() {
     assert_eq!(live.finish(), Err(Error::Timeout));
     server.join().unwrap();
 }
+#[test]
+fn long_silence_after_a_final_never_ends_the_turn_or_drops_live() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let mut ws = accept(listener);
+        for _ in 0..122 {
+            assert!(read(&mut ws)["realtimeInput"]["audio"].is_object());
+        }
+        assert!(read(&mut ws)["realtimeInput"]["activityEnd"].is_object());
+        send(
+            &mut ws,
+            json!({"serverContent":{"inputTranscription":{"text":"Before the pause."}}}),
+        );
+        assert!(read(&mut ws)["realtimeInput"]["activityStart"].is_object());
+        // 400 silent frames (12.8 s): audio only, never another activityEnd.
+        for _ in 0..400 {
+            assert!(read(&mut ws)["realtimeInput"]["audio"].is_object());
+        }
+        send(
+            &mut ws,
+            json!({"serverContent":{"inputTranscription":{"text":"After the pause."}}}),
+        );
+        ws.close(None).unwrap();
+    });
+    let mut live = client(addr);
+    for i in 0..522 {
+        live.audio(&[if i < 100 { 0.25 } else { 0.0 }; 512]).unwrap();
+        live.poll().unwrap();
+        if i >= 122 {
+            thread::sleep(Duration::from_millis(4));
+        }
+    }
+    assert!(live.boundary_wait.is_none());
+    server.join().unwrap();
+}
 // Production setup/audio/poll/finish with a real-time mock socket. No physical mic/paste.
 struct TestLogger;
 impl log::Log for TestLogger {

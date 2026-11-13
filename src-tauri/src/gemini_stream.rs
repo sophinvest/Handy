@@ -65,6 +65,14 @@ fn preview(app: &AppHandle, committed: &str, tentative: &str) {
     }
     .emit(app);
 }
+/// Committed + tentative text currently on the overlay.
+fn last_shown() -> String {
+    LAST_PREVIEW
+        .lock()
+        .ok()
+        .and_then(|l| l.as_ref().map(|(c, t, _)| format!("{c}{t}")))
+        .unwrap_or_default()
+}
 /// Audio length in ms for the diagnostics line (16 kHz mono).
 fn audio_ms(samples: usize) -> u64 {
     (samples as u64) * 1000 / 16_000
@@ -644,6 +652,9 @@ fn worker(
     let mut text = String::new();
     let mut prefix = String::new();
     let mut silence = 0;
+    // Text already on screen when Live falls back to pieces: it stays visible (the
+    // overlay must not collapse) until the replayed pieces cover it (SOP-10793).
+    let mut held = String::new();
     let mut finalizing = false;
     let mut ended = false;
     let api = handy_gemini::Gemini::new().map_err(|e| e.to_string())?;
@@ -698,7 +709,7 @@ fn worker(
                         boundary = 0;
                         cutter = Cutter::new(settings.gemini_chunk_seconds);
 
-                        preview(app, "", "");
+                        held = last_shown();
                     }
                 }
             }
@@ -753,7 +764,7 @@ fn worker(
                         boundary = 0;
                         cutter = Cutter::new(settings.gemini_chunk_seconds);
 
-                        preview(app, "", "");
+                        held = last_shown();
                     }
                 }
             }
@@ -792,7 +803,7 @@ fn worker(
                 boundary = 0;
                 cutter = Cutter::new(settings.gemini_chunk_seconds);
 
-                preview(app, "", "");
+                held = last_shown();
                 continue;
             }
             let mut shown = prefix.clone();
@@ -868,7 +879,9 @@ fn worker(
                     p.offset = sent;
                     p.text = text.clone();
                 }
-                preview(app, &text, "");
+                if text.len() >= held.len() {
+                    preview(app, &text, "");
+                }
             }
             if finalizing {
                 return if sent == audio.len() && !text.is_empty() {
