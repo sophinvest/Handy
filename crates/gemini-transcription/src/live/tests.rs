@@ -301,7 +301,7 @@ fn long_silence_after_a_final_never_ends_the_turn_or_drops_live() {
             &mut ws,
             json!({"serverContent":{"inputTranscription":{"text":"After the pause."}}}),
         );
-        ws.close(None).unwrap();
+        thread::sleep(Duration::from_millis(500));
     });
     let mut live = client(addr);
     for i in 0..522 {
