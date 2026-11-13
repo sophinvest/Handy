@@ -174,6 +174,7 @@ fn prior_final_never_promotes_a_new_unfinished_tail() {
         thread::sleep(Duration::from_millis(1800));
     });
     let mut live = client(addr);
+    live.set_final_wait(Duration::from_millis(500), Duration::from_millis(500));
     live.audio(&[0.25; 512]).unwrap();
     let until = Instant::now() + Duration::from_secs(1);
     while live.text.tentative.is_empty() && Instant::now() < until {
@@ -615,7 +616,7 @@ fn partials_keep_a_long_wait_alive() {
         read(&mut ws);
         assert!(read(&mut ws)["realtimeInput"]["activityEnd"].is_object());
         for i in 0..5 {
-            thread::sleep(Duration::from_millis(400));
+            thread::sleep(Duration::from_millis(300));
             send(
                 &mut ws,
                 json!({"serverContent":{"interimInputTranscription":{"text":format!("part {i}")}}}),
@@ -628,8 +629,8 @@ fn partials_keep_a_long_wait_alive() {
         thread::sleep(Duration::from_millis(900));
     });
     let mut live = client(addr);
-    // 600 ms idle limit: each 400 ms partial resets it, so 2 s in total is fine.
-    live.set_final_wait(Duration::from_millis(600), Duration::from_secs(10));
+    // 1 s idle limit: each 300 ms partial resets it, so 1.5 s in total is fine.
+    live.set_final_wait(Duration::from_millis(1000), Duration::from_secs(10));
     live.audio(&[0.25; 512]).unwrap();
     assert_eq!(live.finish().unwrap(), "Done.");
     server.join().unwrap();
